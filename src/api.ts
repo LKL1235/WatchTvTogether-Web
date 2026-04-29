@@ -102,6 +102,10 @@ export function fetchRoomState(token: string, roomId: string) {
   return apiFetch<RoomState>(`/api/rooms/${roomId}/state`, {}, token)
 }
 
+export function fetchVideo(token: string, id: string) {
+  return apiFetch<Video>(`/api/videos/${encodeURIComponent(id)}`, {}, token)
+}
+
 export function fetchVideos(token: string, opts: string | { query?: string; status?: string } = '') {
   const query = typeof opts === 'string' ? opts : (opts.query ?? '')
   const status = typeof opts === 'string' ? 'ready' : (opts.status ?? 'ready')
