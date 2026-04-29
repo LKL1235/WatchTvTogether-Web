@@ -81,7 +81,8 @@ export interface RoomSnapshotPayload {
   state?: RoomState
   /** 后端快照不再包含实时在线用户；Ably presence 维护成员列表 */
   users?: Array<{ id: string; username: string; role: string; is_owner: boolean }>
-  queue: string[]
+  /** 服务端可能返回 null；前端须归一化为数组 */
+  queue?: string[] | null
   viewer_count: number
   ably?: {
     channel: string

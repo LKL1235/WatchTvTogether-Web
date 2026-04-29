@@ -106,7 +106,8 @@ function isLikelyUrlQueueId(id: string) {
 function isSnapshotPayload(p: unknown): p is RoomSnapshotPayload {
   if (!p || typeof p !== 'object') return false
   const o = p as Record<string, unknown>
-  return typeof o.room_id === 'string' && Array.isArray(o.queue)
+  const q = o.queue
+  return typeof o.room_id === 'string' && (q == null || Array.isArray(q))
 }
 
 async function videoFromQueueId(id: string, token: string): Promise<Video | null> {
@@ -187,7 +188,10 @@ async function applyRoomSnapshot(payload: RoomSnapshotPayload) {
     position.value = s.position
     currentVideo.value = s.video_id || ''
   }
-  const queueIds = payload.queue.length ? payload.queue : (payload.state?.queue ?? [])
+  const topQueue = Array.isArray(payload.queue) ? payload.queue : []
+  const stateQ = payload.state?.queue
+  const fromState = Array.isArray(stateQ) ? stateQ : []
+  const queueIds = topQueue.length ? topQueue : fromState
   if (queueIds.length) {
     queue.value = await buildQueueFromIds(queueIds, auth.accessToken.value)
   }
