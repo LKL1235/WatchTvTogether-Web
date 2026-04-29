@@ -15,12 +15,11 @@ const downloads = ref<DownloadTask[]>([])
 const rooms = ref<Room[]>([])
 const sourceUrl = ref('')
 const message = ref('')
-const wsStatus = ref('未连接')
 const loadError = ref('')
 const loading = ref(false)
 const submitLoading = ref(false)
 const submitError = ref('')
-let socket: WebSocket | null = null
+let downloadPollTimer: ReturnType<typeof setInterval> | null = null
 
 const readyVideos = computed(() => videos.value.filter((video) => video.status === 'ready').length)
 const runningTasks = computed(() => downloads.value.filter((task) => ['pending', 'running'].includes(task.status)).length)
@@ -74,36 +73,33 @@ async function removeVideo(video: Video) {
   }
 }
 
-function connectDownloadSocket() {
-  if (socket) socket.close()
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  const url = `${protocol}//${window.location.host}/ws/admin/downloads?token=${encodeURIComponent(auth.accessToken.value)}`
-  socket = new WebSocket(url)
-  wsStatus.value = '连接中'
-  socket.onopen = () => {
-    wsStatus.value = '已连接'
-  }
-  socket.onclose = () => {
-    wsStatus.value = '已断开'
-  }
-  socket.onerror = () => {
-    wsStatus.value = '连接异常'
-  }
-  socket.onmessage = (event) => {
-    const payload = JSON.parse(event.data)
-    if (payload.type !== 'download_task') return
-    const task = payload.task as DownloadTask
-    downloads.value = [task, ...downloads.value.filter((item) => item.id !== task.id)]
+function startDownloadPolling() {
+  stopDownloadPolling()
+  downloadPollTimer = window.setInterval(async () => {
+    if (!auth.accessToken.value) return
+    try {
+      const res = await fetchDownloads(auth.accessToken.value)
+      downloads.value = res.items
+    } catch {
+      // 静默失败，避免后台页刷屏；用户可点「刷新」
+    }
+  }, 4000)
+}
+
+function stopDownloadPolling() {
+  if (downloadPollTimer != null) {
+    clearInterval(downloadPollTimer)
+    downloadPollTimer = null
   }
 }
 
 onMounted(async () => {
   await loadAll()
-  connectDownloadSocket()
+  startDownloadPolling()
 })
 
 onUnmounted(() => {
-  socket?.close()
+  stopDownloadPolling()
 })
 </script>
 
@@ -134,9 +130,9 @@ onUnmounted(() => {
       <div class="section-head">
         <div>
           <p class="eyebrow">下载管理</p>
-          <h2>提交 URL 并监听实时进度</h2>
+          <h2>提交 URL 并查看进度</h2>
         </div>
-        <span class="pill">WebSocket {{ wsStatus }}</span>
+        <span class="pill">列表约每 4 秒自动刷新</span>
       </div>
       <form class="inline-form" style="margin-bottom: 1rem" @submit.prevent="submitDownload">
         <input
