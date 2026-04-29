@@ -10,11 +10,13 @@ import type { Room } from './types'
 
 const auth = useAuthStore()
 const currentRoom = ref<Room | null>(null)
+const currentJoinPassword = ref('')
 const showAdmin = ref(false)
 const isAdmin = computed(() => auth.user.value?.role === 'admin')
 
 function goLobby() {
   currentRoom.value = null
+  currentJoinPassword.value = ''
   showAdmin.value = false
 }
 
@@ -22,8 +24,15 @@ function goAdmin() {
   showAdmin.value = true
 }
 
+function openRoomFromLobby(room: Room, joinPassword?: string) {
+  currentRoom.value = room
+  currentJoinPassword.value = joinPassword ?? ''
+  showAdmin.value = false
+}
+
 function openRoomFromAdmin(room: Room) {
   currentRoom.value = room
+  currentJoinPassword.value = ''
   showAdmin.value = false
 }
 
@@ -53,8 +62,13 @@ onMounted(() => {
 
     <div class="app-main">
       <AdminView v-if="showAdmin" @open-room="openRoomFromAdmin" />
-      <RoomView v-else-if="currentRoom" :room="currentRoom" @back="currentRoom = null" />
-      <LobbyView v-else @open-room="currentRoom = $event" />
+      <RoomView
+        v-else-if="currentRoom"
+        :room="currentRoom"
+        :join-password="currentJoinPassword || undefined"
+        @back="goLobby"
+      />
+      <LobbyView v-else @open-room="openRoomFromLobby" />
     </div>
   </main>
 </template>
