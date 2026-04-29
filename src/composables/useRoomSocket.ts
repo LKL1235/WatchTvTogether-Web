@@ -1,13 +1,17 @@
 import { onBeforeUnmount, ref } from 'vue'
 
+import type { RoomSnapshotPayload } from '../types'
+
 export interface RoomSocketMessage {
   type: string
   action?: 'play' | 'pause' | 'seek' | 'next' | 'switch'
   event?: string
   position?: number
   video_id?: string
+  /** 服务端广播的当前队列（视频 ID 列表） */
+  queue?: string[]
   timestamp?: number
-  payload?: unknown
+  payload?: RoomSnapshotPayload | Record<string, unknown>
   user?: {
     id: string
     username: string
@@ -40,16 +44,25 @@ export function useRoomSocket(roomId: () => string, token: () => string) {
     })
   }
 
-  function sendControl(action: RoomSocketMessage['action'], position = 0, videoId = '') {
+  function sendControl(
+    action: RoomSocketMessage['action'],
+    position = 0,
+    videoId = '',
+    queueIds?: string[],
+  ) {
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       return
     }
-    socket.send(JSON.stringify({
+    const body: Record<string, unknown> = {
       type: 'play_control',
       action,
       position,
       video_id: videoId,
-    }))
+    }
+    if (queueIds !== undefined) {
+      body.queue = queueIds
+    }
+    socket.send(JSON.stringify(body))
   }
 
   function close() {

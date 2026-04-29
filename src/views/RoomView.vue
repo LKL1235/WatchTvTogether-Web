@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import Hls from 'hls.js'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { fetchRoomState, fetchVideos, kickRoomMember } from '../api'
+import { fetchRoomState, fetchVideo, fetchVideos, kickRoomMember } from '../api'
 import { useRoomSocket, type RoomSocketMessage } from '../composables/useRoomSocket'
 import { useAuthStore } from '../stores/auth'
 import { formatApiError } from '../utils/errors'
-import type { Room, RoomState, Video } from '../types'
+import type { Room, RoomSnapshotPayload, RoomState, Video } from '../types'
 import AppButton from '../components/ui/AppButton.vue'
 import AppCard from '../components/ui/AppCard.vue'
 
@@ -21,7 +21,7 @@ const queue = ref<Video[]>([])
 const videoElement = ref<HTMLVideoElement | null>(null)
 let hls: Hls | null = null
 const currentUser = computed(() => auth.user.value)
-const members = ref<string[]>([currentUser.value?.username ?? 'me'])
+const members = ref<Array<{ id: string; username: string }>>([])
 const canControl = computed(
   () => currentUser.value?.role === 'admin' || props.room.is_owner || props.room.owner_id === currentUser.value?.id,
 )
@@ -40,6 +40,107 @@ const eventPreview = computed(() =>
   socket.events.value.slice(0, 5).map((e) => JSON.stringify(e, null, 0)).join('\n'),
 )
 
+function isLikelyUrlQueueId(id: string) {
+  return /^https?:\/\//i.test(id) || id.startsWith('//')
+}
+
+function isSnapshotPayload(p: unknown): p is RoomSnapshotPayload {
+  if (!p || typeof p !== 'object') return false
+  const o = p as Record<string, unknown>
+  return typeof o.room_id === 'string' && Array.isArray(o.users) && Array.isArray(o.queue)
+}
+
+async function videoFromQueueId(id: string, token: string): Promise<Video | null> {
+  if (isLikelyUrlQueueId(id)) {
+    return {
+      id,
+      title: id.split('/').pop() || id,
+      file_path: id,
+      file_url: id,
+      duration: 0,
+      format: id.split('.').pop() || '',
+      size: 0,
+      status: 'ready',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    }
+  }
+  const inLib = library.value.find((v) => v.id === id)
+  if (inLib) return inLib
+  try {
+    const v = await fetchVideo(token, id)
+    if (!library.value.some((x) => x.id === v.id)) {
+      library.value = [...library.value, v]
+    }
+    return v
+  } catch {
+    return {
+      id,
+      title: `未知视频 (${id.slice(0, 8)}…)`,
+      file_path: '',
+      file_url: `/api/videos/${id}/file`,
+      duration: 0,
+      format: '',
+      size: 0,
+      status: 'ready',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    }
+  }
+}
+
+async function buildQueueFromIds(ids: string[], token: string): Promise<Video[]> {
+  const out: Video[] = []
+  for (const id of ids) {
+    const v = await videoFromQueueId(id, token)
+    if (v) out.push(v)
+  }
+  return out
+}
+
+function applyRoomUsersFromSnapshot(users: RoomSnapshotPayload['users']) {
+  const list = users.map((u) => ({ id: u.id, username: u.username }))
+  const self = currentUser.value
+  if (self && !list.some((m) => m.id === self.id)) {
+    list.push({ id: self.id, username: self.username })
+  }
+  members.value = list
+}
+
+function applyStateFromSyncMessage(message: RoomSocketMessage) {
+  const ts = message.timestamp ?? Date.now() / 1000
+  state.value = {
+    room_id: props.room.id,
+    action: message.action ?? 'pause',
+    position: message.position ?? 0,
+    video_id: message.video_id ?? '',
+    queue: message.queue,
+    updated_at: new Date(ts * 1000).toISOString(),
+  }
+  position.value = state.value.position
+  currentVideo.value = state.value.video_id ?? ''
+  syncPlayer(message.action ?? 'pause', state.value.position)
+}
+
+async function applyRoomSnapshot(payload: RoomSnapshotPayload) {
+  applyRoomUsersFromSnapshot(payload.users)
+  if (payload.state) {
+    const s = payload.state
+    state.value = { ...s, room_id: payload.room_id }
+    position.value = s.position
+    currentVideo.value = s.video_id || ''
+  }
+  const queueIds = payload.queue.length ? payload.queue : (payload.state?.queue ?? [])
+  if (queueIds.length) {
+    queue.value = await buildQueueFromIds(queueIds, auth.accessToken.value)
+  }
+  await nextTick()
+  loadPlaybackSource()
+  if (state.value) {
+    syncPlayer(state.value.action, state.value.position)
+  }
+}
+
 onMounted(async () => {
   roomLoadError.value = ''
   try {
@@ -49,9 +150,18 @@ onMounted(async () => {
     ])
     state.value = roomState
     library.value = videos.items
-    queue.value = videos.items.slice(0, 5)
+    const self = currentUser.value
+    members.value = self ? [{ id: self.id, username: self.username }] : []
     position.value = state.value.position
-    currentVideo.value = state.value.video_id || currentVideo.value || queue.value[0]?.id || ''
+    currentVideo.value = state.value.video_id || currentVideo.value || ''
+    if (state.value.queue?.length) {
+      queue.value = await buildQueueFromIds(state.value.queue, auth.accessToken.value)
+    } else {
+      queue.value = []
+    }
+    if (!currentVideo.value && queue.value[0]) {
+      currentVideo.value = queue.value[0].id
+    }
     socket.connect()
     await nextTick()
     loadPlaybackSource()
@@ -64,27 +174,38 @@ onBeforeUnmount(() => hls?.destroy())
 
 watch(socket.lastMessage, (message) => {
   if (!message) return
-  if (message.type === 'sync') {
-    state.value = {
-      room_id: props.room.id,
-      action: message.action ?? 'pause',
-      position: message.position ?? 0,
-      video_id: message.video_id ?? '',
-      updated_at: new Date((message.timestamp ?? Date.now() / 1000) * 1000).toISOString(),
-    }
-    position.value = state.value.position
-    currentVideo.value = state.value.video_id ?? ''
-    syncPlayer(message.action ?? 'pause', state.value.position)
+  if (message.type === 'room_snapshot' && isSnapshotPayload(message.payload)) {
+    void applyRoomSnapshot(message.payload)
+    return
   }
-  if (message.type === 'room_event' && message.user?.username && !members.value.includes(message.user.username)) {
-    members.value.push(message.user.username)
+  if (message.type === 'sync') {
+    applyStateFromSyncMessage(message)
+    const q = message.queue
+    if (q?.length) {
+      void buildQueueFromIds(q, auth.accessToken.value).then((built) => {
+        queue.value = built
+      })
+    }
+    return
+  }
+  if (message.type === 'room_event' && message.user) {
+    const u = message.user
+    if (message.event === 'user_joined') {
+      if (!members.value.some((m) => m.id === u.id)) {
+        members.value = [...members.value, { id: u.id, username: u.username }]
+      }
+    }
+    if (message.event === 'user_left') {
+      members.value = members.value.filter((m) => m.id !== u.id)
+    }
   }
 })
 
 function send(action: RoomSocketMessage['action']) {
   if (!canControl.value) return
   position.value = videoElement.value?.currentTime ?? Number(position.value)
-  socket.sendControl(action, Number(position.value), currentVideo.value)
+  const queueIds = queue.value.map((v) => v.id)
+  socket.sendControl(action, Number(position.value), currentVideo.value, queueIds)
   syncPlayer(action, Number(position.value))
 }
 
@@ -158,11 +279,11 @@ function removeQueue(index: number) {
   queue.value.splice(index, 1)
 }
 
-async function kick(member: string) {
+async function kick(member: { id: string; username: string }) {
   if (!canControl.value) return
   try {
-    await kickRoomMember(auth.accessToken.value, props.room.id, member)
-    members.value = members.value.filter((item) => item !== member)
+    await kickRoomMember(auth.accessToken.value, props.room.id, member.id)
+    members.value = members.value.filter((item) => item.id !== member.id)
   } catch (err) {
     window.alert(formatApiError(err, '踢出失败'))
   }
@@ -256,11 +377,11 @@ function closeSidebar() {
 
       <AppCard padding="compact">
         <h3 class="sidebar-heading">在线成员</h3>
-        <div class="member" v-for="member in members" :key="member">
-          <span class="avatar">{{ member.slice(0, 1).toUpperCase() }}</span>
-          {{ member }}
+        <div class="member" v-for="member in members" :key="member.id">
+          <span class="avatar">{{ member.username.slice(0, 1).toUpperCase() }}</span>
+          {{ member.username }}
           <AppButton
-            v-if="canControl && member !== currentUser?.username"
+            v-if="canControl && member.id !== currentUser?.id"
             size="sm"
             variant="danger"
             @click="kick(member)"

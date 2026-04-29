@@ -27,10 +27,21 @@ export interface Room {
 export interface RoomState {
   room_id: string
   video_id?: string
+  /** 与后端房间状态一致，同步与快照中可能包含队列 ID 列表 */
+  queue?: string[]
   action: 'play' | 'pause' | 'seek' | 'next' | 'switch'
   position: number
   updated_by?: string
   updated_at?: string
+}
+
+/** WebSocket `room_snapshot` 消息的 payload，与后端 `room.Snapshot` 一致 */
+export interface RoomSnapshotPayload {
+  room_id: string
+  state?: RoomState
+  users: Array<{ id: string; username: string; role: string; is_owner: boolean }>
+  queue: string[]
+  viewer_count: number
 }
 
 export interface Video {
