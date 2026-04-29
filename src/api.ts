@@ -1,6 +1,6 @@
 import type { AuthTokens, CapabilityReport, DownloadTask, Room, RoomState, User, Video } from './types'
 
-const API_BASE = import.meta.env.VITE_API_BASE ?? ''
+const API_BASE = import.meta.env.VITE_API_BASE ?? 'https://watchtvtogether.bestlkl.top'
 
 export class ApiError extends Error {
   constructor(
