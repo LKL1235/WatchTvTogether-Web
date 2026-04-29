@@ -2,8 +2,13 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { createDownload, deleteVideo, fetchDownloads, fetchRooms, fetchVideos } from '../api'
 import { useAuthStore } from '../stores/auth'
+import { formatApiError } from '../utils/errors'
 import type { DownloadTask, Room, Video } from '../types'
+import AppButton from '../components/ui/AppButton.vue'
+import AppCard from '../components/ui/AppCard.vue'
+import AppEmpty from '../components/ui/AppEmpty.vue'
 
+const emit = defineEmits<{ 'open-room': [room: Room] }>()
 const auth = useAuthStore()
 const videos = ref<Video[]>([])
 const downloads = ref<DownloadTask[]>([])
@@ -11,33 +16,62 @@ const rooms = ref<Room[]>([])
 const sourceUrl = ref('')
 const message = ref('')
 const wsStatus = ref('未连接')
+const loadError = ref('')
+const loading = ref(false)
+const submitLoading = ref(false)
+const submitError = ref('')
 let socket: WebSocket | null = null
 
 const readyVideos = computed(() => videos.value.filter((video) => video.status === 'ready').length)
 const runningTasks = computed(() => downloads.value.filter((task) => ['pending', 'running'].includes(task.status)).length)
 
 async function loadAll() {
-  const [videoRes, downloadRes, roomRes] = await Promise.all([
-    fetchVideos(auth.accessToken.value),
-    fetchDownloads(auth.accessToken.value),
-    fetchRooms(auth.accessToken.value),
-  ])
-  videos.value = videoRes.items
-  downloads.value = downloadRes.items
-  rooms.value = roomRes.items
+  loadError.value = ''
+  loading.value = true
+  try {
+    const [videoRes, downloadRes, roomRes] = await Promise.all([
+      fetchVideos(auth.accessToken.value),
+      fetchDownloads(auth.accessToken.value),
+      fetchRooms(auth.accessToken.value),
+    ])
+    videos.value = videoRes.items
+    downloads.value = downloadRes.items
+    rooms.value = roomRes.items
+  } catch (err) {
+    loadError.value = formatApiError(err, '加载管理数据失败')
+  } finally {
+    loading.value = false
+  }
 }
 
 async function submitDownload() {
-  if (!sourceUrl.value.trim()) return
-  const task = await createDownload(auth.accessToken.value, sourceUrl.value)
-  downloads.value = [task, ...downloads.value.filter((item) => item.id !== task.id)]
-  sourceUrl.value = ''
-  message.value = '下载任务已提交'
+  submitError.value = ''
+  message.value = ''
+  if (!sourceUrl.value.trim()) {
+    submitError.value = '请输入要下载的链接'
+    return
+  }
+  submitLoading.value = true
+  try {
+    const task = await createDownload(auth.accessToken.value, sourceUrl.value.trim())
+    downloads.value = [task, ...downloads.value.filter((item) => item.id !== task.id)]
+    sourceUrl.value = ''
+    message.value = '下载任务已提交'
+  } catch (err) {
+    submitError.value = formatApiError(err, '提交下载失败')
+  } finally {
+    submitLoading.value = false
+  }
 }
 
 async function removeVideo(video: Video) {
-  await deleteVideo(auth.accessToken.value, video.id)
-  videos.value = videos.value.filter((item) => item.id !== video.id)
+  if (!window.confirm(`确定删除「${video.title}」？`)) return
+  try {
+    await deleteVideo(auth.accessToken.value, video.id)
+    videos.value = videos.value.filter((item) => item.id !== video.id)
+  } catch (err) {
+    window.alert(formatApiError(err, '删除失败'))
+  }
 }
 
 function connectDownloadSocket() {
@@ -51,6 +85,9 @@ function connectDownloadSocket() {
   }
   socket.onclose = () => {
     wsStatus.value = '已断开'
+  }
+  socket.onerror = () => {
+    wsStatus.value = '连接异常'
   }
   socket.onmessage = (event) => {
     const payload = JSON.parse(event.data)
@@ -72,25 +109,28 @@ onUnmounted(() => {
 
 <template>
   <section class="admin-stack">
-    <div class="stats-grid">
-      <article class="panel stat-card">
+    <p v-if="loadError" class="error" role="alert">{{ loadError }}</p>
+    <div v-if="loading && !videos.length && !downloads.length" class="muted" aria-live="polite">正在加载…</div>
+
+    <div v-else class="stats-grid">
+      <AppCard padding="compact" hover>
         <p class="eyebrow">视频库</p>
         <strong>{{ videos.length }}</strong>
-        <span>{{ readyVideos }} 个可播放</span>
-      </article>
-      <article class="panel stat-card">
+        <span class="muted">{{ readyVideos }} 个可播放</span>
+      </AppCard>
+      <AppCard padding="compact" hover>
         <p class="eyebrow">下载任务</p>
         <strong>{{ downloads.length }}</strong>
-        <span>{{ runningTasks }} 个进行中</span>
-      </article>
-      <article class="panel stat-card">
+        <span class="muted">{{ runningTasks }} 个进行中</span>
+      </AppCard>
+      <AppCard padding="compact" hover>
         <p class="eyebrow">房间监控</p>
         <strong>{{ rooms.length }}</strong>
-        <span>当前房间</span>
-      </article>
+        <span class="muted">当前房间</span>
+      </AppCard>
     </div>
 
-    <section class="panel">
+    <AppCard>
       <div class="section-head">
         <div>
           <p class="eyebrow">下载管理</p>
@@ -98,55 +138,65 @@ onUnmounted(() => {
         </div>
         <span class="pill">WebSocket {{ wsStatus }}</span>
       </div>
-      <form class="inline-form" @submit.prevent="submitDownload">
-        <input v-model="sourceUrl" placeholder="https://example.com/movie.mp4 或 m3u8 / 站点链接" />
-        <button type="submit">提交下载</button>
+      <form class="inline-form" style="margin-bottom: 1rem" @submit.prevent="submitDownload">
+        <input
+          v-model="sourceUrl"
+          class="ui-input"
+          style="flex: 1; min-width: 200px"
+          placeholder="https://example.com/movie.mp4 或 m3u8 / 站点链接"
+        />
+        <AppButton type="submit" :loading="submitLoading">提交下载</AppButton>
       </form>
+      <p v-if="submitError" class="error" role="alert">{{ submitError }}</p>
       <p v-if="message" class="success">{{ message }}</p>
       <div class="table-list">
+        <div v-if="!downloads.length" class="muted">暂无下载任务。</div>
         <div class="table-row" v-for="task in downloads" :key="task.id">
           <div>
             <strong>{{ task.source_url }}</strong>
-            <small>{{ task.status }} · {{ Math.round(task.progress) }}%</small>
+            <small class="muted">{{ task.status }} · {{ Math.round(task.progress) }}%</small>
           </div>
           <progress max="100" :value="task.progress"></progress>
         </div>
-        <p v-if="downloads.length === 0" class="muted">暂无下载任务。</p>
       </div>
-    </section>
+    </AppCard>
 
-    <section class="panel">
+    <AppCard>
       <div class="section-head">
         <div>
           <p class="eyebrow">视频库管理</p>
           <h2>服务器缓存视频</h2>
         </div>
-        <button class="secondary" @click="loadAll">刷新</button>
+        <AppButton variant="secondary" size="sm" :loading="loading" @click="loadAll">刷新</AppButton>
       </div>
       <div class="video-library">
         <article class="video-card" v-for="video in videos" :key="video.id">
           <img v-if="video.poster_path" :src="video.poster_path" :alt="video.title" />
           <div v-else class="poster-placeholder">无封面</div>
           <strong>{{ video.title }}</strong>
-          <small>{{ video.format || 'unknown' }} · {{ Math.round(video.duration || 0) }} 秒 · {{ video.status }}</small>
-          <button class="danger" @click="removeVideo(video)">删除</button>
+          <small class="muted">{{ video.format || 'unknown' }} · {{ Math.round(video.duration || 0) }} 秒 · {{ video.status }}</small>
+          <AppButton variant="danger" size="sm" @click="removeVideo(video)">删除</AppButton>
         </article>
-        <p v-if="videos.length === 0" class="muted">暂无缓存视频。</p>
+        <AppEmpty v-if="!videos.length" title="暂无缓存视频" description="提交下载任务后，就绪的视频会出现在这里。" />
       </div>
-    </section>
+    </AppCard>
 
-    <section class="panel">
+    <AppCard>
       <p class="eyebrow">房间监控</p>
-      <h2>当前房间</h2>
+      <h2 class="section-title" style="margin-top: 0.25rem">当前房间</h2>
       <div class="table-list">
+        <div v-if="!rooms.length" class="muted">暂无房间。</div>
         <div class="table-row" v-for="room in rooms" :key="room.id">
           <div>
             <strong>{{ room.name }}</strong>
-            <small>{{ room.visibility }} · owner {{ room.owner_id }}</small>
+            <small class="muted">{{ room.visibility }} · owner {{ room.owner_id }}</small>
           </div>
-          <span class="pill">{{ room.current_video_id || '未选择视频' }}</span>
+          <div style="display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap">
+            <span class="pill">{{ room.current_video_id || '未选择视频' }}</span>
+            <AppButton size="sm" variant="secondary" @click="emit('open-room', room)">进入房间</AppButton>
+          </div>
         </div>
       </div>
-    </section>
+    </AppCard>
   </section>
 </template>
