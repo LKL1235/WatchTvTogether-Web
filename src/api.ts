@@ -1,6 +1,18 @@
-import type { AuthTokens, CapabilityReport, DownloadTask, Room, RoomState, User, Video } from './types'
+import type {
+  AblyTokenDetails,
+  AuthTokens,
+  CapabilityReport,
+  DownloadTask,
+  PlaybackAction,
+  Room,
+  RoomSnapshotPayload,
+  RoomSocketMessage,
+  RoomState,
+  User,
+  Video,
+} from './types'
 
-const API_BASE = import.meta.env.VITE_API_BASE ?? 'https://watchtvtogether.bestlkl.top'
+export const API_BASE = import.meta.env.VITE_API_BASE ?? 'https://watchtvtogether.bestlkl.top'
 
 export class ApiError extends Error {
   constructor(
@@ -100,6 +112,46 @@ export function fetchRoom(token: string, roomId: string) {
 
 export function fetchRoomState(token: string, roomId: string) {
   return apiFetch<RoomState>(`/api/rooms/${roomId}/state`, {}, token)
+}
+
+export function fetchAblyToken(
+  token: string,
+  input: { room_id: string; purpose: 'room'; password?: string },
+) {
+  return apiFetch<AblyTokenDetails>(
+    '/api/ably/token',
+    {
+      method: 'POST',
+      body: JSON.stringify(input),
+    },
+    token,
+  )
+}
+
+export function sendRoomControl(
+  token: string,
+  roomId: string,
+  input: { action: PlaybackAction; position: number; video_id: string; queue?: string[] },
+) {
+  return apiFetch<RoomSocketMessage>(
+    `/api/rooms/${roomId}/control`,
+    {
+      method: 'POST',
+      body: JSON.stringify(input),
+    },
+    token,
+  )
+}
+
+export function fetchRoomSnapshot(token: string, roomId: string, password?: string) {
+  return apiFetch<RoomSnapshotPayload>(
+    `/api/rooms/${roomId}/snapshot`,
+    {
+      method: 'POST',
+      body: JSON.stringify(password !== undefined ? { password } : {}),
+    },
+    token,
+  )
 }
 
 export function fetchVideo(token: string, id: string) {

@@ -24,24 +24,69 @@ export interface Room {
   is_owner?: boolean
 }
 
+export type PlaybackAction = 'play' | 'pause' | 'seek' | 'next' | 'switch'
+
 export interface RoomState {
   room_id: string
   video_id?: string
   /** 与后端房间状态一致，同步与快照中可能包含队列 ID 列表 */
   queue?: string[]
-  action: 'play' | 'pause' | 'seek' | 'next' | 'switch'
+  action: PlaybackAction
   position: number
   updated_by?: string
   updated_at?: string
 }
 
-/** WebSocket `room_snapshot` 消息的 payload，与后端 `room.Snapshot` 一致 */
+/** Ably / HTTP 广播的同步与控制消息体，与后端 WebSocket 时代字段对齐 */
+export interface RoomSocketMessage {
+  type: string
+  action?: PlaybackAction
+  event?: string
+  position?: number
+  video_id?: string
+  queue?: string[]
+  timestamp?: number
+  payload?: RoomSnapshotPayload | Record<string, unknown>
+  user?: {
+    id: string
+    username: string
+    role: string
+    is_owner: boolean
+  }
+}
+
+/** Ably 频道消息的通用结构（name 如 room.sync，data 为 JSON） */
+export type RoomRealtimeMessage = RoomSocketMessage
+
+export interface AblyTokenDetails {
+  token: string
+  expires: number
+  issued: number
+  capability: string
+  clientId: string
+}
+
+export interface RoomPresenceMember {
+  /** 后端 JWT 用户 ID，与 Ably clientId 一致 */
+  id: string
+  username: string
+  role?: string
+  is_owner?: boolean
+  connectionId?: string
+}
+
+/** 服务端 POST /api/rooms/:id/snapshot 返回 */
 export interface RoomSnapshotPayload {
   room_id: string
   state?: RoomState
-  users: Array<{ id: string; username: string; role: string; is_owner: boolean }>
+  /** 后端快照不再包含实时在线用户；Ably presence 维护成员列表 */
+  users?: Array<{ id: string; username: string; role: string; is_owner: boolean }>
   queue: string[]
   viewer_count: number
+  ably?: {
+    channel: string
+    token_endpoint: string
+  }
 }
 
 export interface Video {

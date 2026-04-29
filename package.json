@@ -10,12 +10,13 @@
   },
   "dependencies": {
     "@vitejs/plugin-vue": "latest",
+    "ably": "^2.21.0",
     "hls.js": "latest",
     "pinia": "latest",
+    "video.js": "latest",
     "vite": "latest",
     "vue": "latest",
-    "vue-router": "latest",
-    "video.js": "latest"
+    "vue-router": "latest"
   },
   "devDependencies": {
     "typescript": "latest",

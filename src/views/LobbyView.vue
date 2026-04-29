@@ -11,7 +11,7 @@ import AppInput from '../components/ui/AppInput.vue'
 import AppModal from '../components/ui/AppModal.vue'
 import AppSelect from '../components/ui/AppSelect.vue'
 
-const emit = defineEmits<{ 'open-room': [room: Room] }>()
+const emit = defineEmits<{ 'open-room': [room: Room, joinPassword?: string] }>()
 const auth = useAuthStore()
 const rooms = ref<Room[]>([])
 const loading = ref(false)
@@ -89,7 +89,7 @@ async function confirmJoin() {
   try {
     const joined = await joinRoom(auth.accessToken.value, pendingRoom.value.id, joinPassword.value)
     closeJoinModal()
-    emit('open-room', joined)
+    emit('open-room', joined, joinPassword.value)
   } catch (err) {
     joinError.value = formatApiError(err, '加入失败，请检查密码或稍后重试')
   } finally {

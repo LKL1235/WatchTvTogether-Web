@@ -1,15 +1,19 @@
 <script setup lang="ts">
 import Hls from 'hls.js'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { fetchRoomState, fetchVideo, fetchVideos, kickRoomMember } from '../api'
-import { useRoomSocket, type RoomSocketMessage } from '../composables/useRoomSocket'
+import { API_BASE, fetchRoomSnapshot, fetchVideo, fetchVideos, kickRoomMember, sendRoomControl } from '../api'
+import { useRoomRealtime } from '../composables/useRoomRealtime'
 import { useAuthStore } from '../stores/auth'
 import { formatApiError } from '../utils/errors'
-import type { Room, RoomSnapshotPayload, RoomState, Video } from '../types'
+import type { Room, RoomSnapshotPayload, RoomState, RoomSocketMessage, Video } from '../types'
 import AppButton from '../components/ui/AppButton.vue'
 import AppCard from '../components/ui/AppCard.vue'
 
-const props = defineProps<{ room: Room & { is_owner?: boolean } }>()
+const props = defineProps<{
+  room: Room & { is_owner?: boolean }
+  /** 仅运行期：普通成员进入私有房时由大厅传入，供 Ably 续签与 snapshot，不持久化 */
+  joinPassword?: string
+}>()
 const emit = defineEmits<{ back: [] }>()
 const auth = useAuthStore()
 const state = ref<RoomState | null>(null)
@@ -21,24 +25,79 @@ const queue = ref<Video[]>([])
 const videoElement = ref<HTMLVideoElement | null>(null)
 let hls: Hls | null = null
 const currentUser = computed(() => auth.user.value)
-const members = ref<Array<{ id: string; username: string }>>([])
-const canControl = computed(
-  () => currentUser.value?.role === 'admin' || props.room.is_owner || props.room.owner_id === currentUser.value?.id,
+
+/** 内存中的本次入房密码（私有房成员）；房主走大厅不设此项 */
+const runtimeRoomPassword = ref(props.joinPassword ?? '')
+const ablyChannelName = ref<string | undefined>(undefined)
+const ablyTokenEndpoint = ref<string | undefined>(undefined)
+
+const isSiteAdmin = computed(() => currentUser.value?.role === 'admin')
+const isRoomOwnerOrAdmin = computed(
+  () =>
+    isSiteAdmin.value || props.room.is_owner === true || props.room.owner_id === currentUser.value?.id,
 )
-const socket = useRoomSocket(() => props.room.id, () => auth.accessToken.value)
+
+const canControl = computed(() => isRoomOwnerOrAdmin.value)
+
+const {
+  connected: rtConnected,
+  connecting: rtConnecting,
+  connectionState: rtConnectionState,
+  lastMessage: rtLastMessage,
+  events: rtEvents,
+  members,
+  error: rtError,
+  connect: connectRealtime,
+  disconnect: disconnectRealtime,
+} = useRoomRealtime({
+  roomId: () => props.room.id,
+  accessToken: () => auth.accessToken.value,
+  currentUser: () => currentUser.value,
+  channelName: () => ablyChannelName.value,
+  roomPassword: () => (isRoomOwnerOrAdmin.value ? undefined : runtimeRoomPassword.value || undefined),
+  isOwnerOrAdmin: () => isRoomOwnerOrAdmin.value,
+})
+
+watch(
+  () => props.joinPassword,
+  (v) => {
+    runtimeRoomPassword.value = v ?? ''
+  },
+)
+
+const connectionStatusLabel = computed(() => {
+  const s = rtConnectionState.value
+  if (s === 'connected' && rtConnected.value) return '已连接'
+  if (s === 'connecting' || rtConnecting.value) return '连接中'
+  if (s === 'disconnected') return '已断开'
+  if (s === 'suspended') return '挂起（重连中）'
+  if (s === 'failed') return '失败'
+  return s
+})
+
 const selectedVideo = computed(
   () => queue.value.find((item) => item.id === currentVideo.value) ?? library.value.find((item) => item.id === currentVideo.value),
 )
 const playbackUrl = computed(() => {
   if (!selectedVideo.value) return currentVideo.value
-  return selectedVideo.value.file_url || `/api/videos/${selectedVideo.value.id}/file`
+  const raw = selectedVideo.value.file_url || `/api/videos/${selectedVideo.value.id}/file`
+  if (raw.startsWith('http://') || raw.startsWith('https://') || raw.startsWith('//')) {
+    return raw
+  }
+  if (raw.startsWith('/')) {
+    return `${API_BASE}${raw}`
+  }
+  return raw
 })
 
 const roomLoadError = ref('')
 const sidebarOpen = ref(false)
+const controlError = ref('')
 const eventPreview = computed(() =>
-  socket.events.value.slice(0, 5).map((e) => JSON.stringify(e, null, 0)).join('\n'),
+  rtEvents.value.slice(0, 5).map((e) => JSON.stringify(e, null, 0)).join('\n'),
 )
+
+const isDev = import.meta.env.DEV
 
 function isLikelyUrlQueueId(id: string) {
   return /^https?:\/\//i.test(id) || id.startsWith('//')
@@ -47,7 +106,7 @@ function isLikelyUrlQueueId(id: string) {
 function isSnapshotPayload(p: unknown): p is RoomSnapshotPayload {
   if (!p || typeof p !== 'object') return false
   const o = p as Record<string, unknown>
-  return typeof o.room_id === 'string' && Array.isArray(o.users) && Array.isArray(o.queue)
+  return typeof o.room_id === 'string' && Array.isArray(o.queue)
 }
 
 async function videoFromQueueId(id: string, token: string): Promise<Video | null> {
@@ -74,11 +133,12 @@ async function videoFromQueueId(id: string, token: string): Promise<Video | null
     }
     return v
   } catch {
+    const rel = `/api/videos/${id}/file`
     return {
       id,
       title: `未知视频 (${id.slice(0, 8)}…)`,
       file_path: '',
-      file_url: `/api/videos/${id}/file`,
+      file_url: `${API_BASE}${rel}`,
       duration: 0,
       format: '',
       size: 0,
@@ -98,15 +158,6 @@ async function buildQueueFromIds(ids: string[], token: string): Promise<Video[]>
   return out
 }
 
-function applyRoomUsersFromSnapshot(users: RoomSnapshotPayload['users']) {
-  const list = users.map((u) => ({ id: u.id, username: u.username }))
-  const self = currentUser.value
-  if (self && !list.some((m) => m.id === self.id)) {
-    list.push({ id: self.id, username: self.username })
-  }
-  members.value = list
-}
-
 function applyStateFromSyncMessage(message: RoomSocketMessage) {
   const ts = message.timestamp ?? Date.now() / 1000
   state.value = {
@@ -123,7 +174,13 @@ function applyStateFromSyncMessage(message: RoomSocketMessage) {
 }
 
 async function applyRoomSnapshot(payload: RoomSnapshotPayload) {
-  applyRoomUsersFromSnapshot(payload.users)
+  if (payload.ably?.channel) {
+    ablyChannelName.value = payload.ably.channel
+  }
+  if (payload.ably?.token_endpoint) {
+    ablyTokenEndpoint.value = payload.ably.token_endpoint
+  }
+
   if (payload.state) {
     const s = payload.state
     state.value = { ...s, room_id: payload.room_id }
@@ -144,25 +201,19 @@ async function applyRoomSnapshot(payload: RoomSnapshotPayload) {
 onMounted(async () => {
   roomLoadError.value = ''
   try {
-    const [roomState, videos] = await Promise.all([
-      fetchRoomState(auth.accessToken.value, props.room.id),
+    const pwd =
+      isRoomOwnerOrAdmin.value || props.room.visibility === 'public' ? undefined : runtimeRoomPassword.value
+    const [snapshot, videos] = await Promise.all([
+      fetchRoomSnapshot(auth.accessToken.value, props.room.id, pwd),
       fetchVideos(auth.accessToken.value, { status: 'ready' }),
     ])
-    state.value = roomState
     library.value = videos.items
-    const self = currentUser.value
-    members.value = self ? [{ id: self.id, username: self.username }] : []
-    position.value = state.value.position
-    currentVideo.value = state.value.video_id || currentVideo.value || ''
-    if (state.value.queue?.length) {
-      queue.value = await buildQueueFromIds(state.value.queue, auth.accessToken.value)
-    } else {
-      queue.value = []
+    await applyRoomSnapshot(snapshot)
+    if (!ablyChannelName.value) {
+      roomLoadError.value = '房间快照未返回 Ably 频道名，无法建立实时连接'
+      return
     }
-    if (!currentVideo.value && queue.value[0]) {
-      currentVideo.value = queue.value[0].id
-    }
-    socket.connect()
+    connectRealtime()
     await nextTick()
     loadPlaybackSource()
   } catch (err) {
@@ -170,9 +221,13 @@ onMounted(async () => {
   }
 })
 
-onBeforeUnmount(() => hls?.destroy())
+onBeforeUnmount(() => {
+  hls?.destroy()
+  disconnectRealtime()
+  runtimeRoomPassword.value = ''
+})
 
-watch(socket.lastMessage, (message) => {
+watch(rtLastMessage, (message) => {
   if (!message) return
   if (message.type === 'room_snapshot' && isSnapshotPayload(message.payload)) {
     void applyRoomSnapshot(message.payload)
@@ -190,23 +245,37 @@ watch(socket.lastMessage, (message) => {
   }
   if (message.type === 'room_event' && message.user) {
     const u = message.user
-    if (message.event === 'user_joined') {
-      if (!members.value.some((m) => m.id === u.id)) {
-        members.value = [...members.value, { id: u.id, username: u.username }]
-      }
+    if (message.event === 'user_kicked' && currentUser.value && u.id === currentUser.value.id) {
+      window.alert('你已被移出该房间')
+      emit('back')
     }
-    if (message.event === 'user_left') {
-      members.value = members.value.filter((m) => m.id !== u.id)
-    }
+  }
+  if (message.type === 'room_event' && message.event === 'room_deleted') {
+    window.alert('房间已删除')
+    emit('back')
   }
 })
 
-function send(action: RoomSocketMessage['action']) {
+async function send(action: RoomSocketMessage['action']) {
   if (!canControl.value) return
+  controlError.value = ''
   position.value = videoElement.value?.currentTime ?? Number(position.value)
   const queueIds = queue.value.map((v) => v.id)
-  socket.sendControl(action, Number(position.value), currentVideo.value, queueIds)
-  syncPlayer(action, Number(position.value))
+  try {
+    const msg = await sendRoomControl(auth.accessToken.value, props.room.id, {
+      action: action!,
+      position: Number(position.value),
+      video_id: currentVideo.value,
+      queue: queueIds,
+    })
+    if (msg.type === 'sync' || msg.action) {
+      applyStateFromSyncMessage(msg)
+    } else {
+      syncPlayer(action ?? 'pause', Number(position.value))
+    }
+  } catch (err) {
+    controlError.value = formatApiError(err, '同步失败')
+  }
 }
 
 watch(playbackUrl, () => loadPlaybackSource())
@@ -283,10 +352,14 @@ async function kick(member: { id: string; username: string }) {
   if (!canControl.value) return
   try {
     await kickRoomMember(auth.accessToken.value, props.room.id, member.id)
-    members.value = members.value.filter((item) => item.id !== member.id)
   } catch (err) {
     window.alert(formatApiError(err, '踢出失败'))
   }
+}
+
+function reconnectRealtime() {
+  disconnectRealtime()
+  connectRealtime()
 }
 
 function closeSidebar() {
@@ -306,6 +379,27 @@ function closeSidebar() {
     <div class="room-main">
       <AppCard padding="compact">
         <AppButton variant="ghost" size="sm" @click="emit('back')">← 返回大厅</AppButton>
+
+        <div class="realtime-bar muted" style="margin-top: 0.5rem; display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center">
+          <span>
+            实时同步：<strong>{{ connectionStatusLabel }}</strong>
+          </span>
+          <span v-if="members.length">在线 {{ members.length }} 人</span>
+          <span v-if="ablyChannelName" class="channel-hint" title="Ably 频道">频道 {{ ablyChannelName }}</span>
+          <span v-if="ablyTokenEndpoint">{{ ablyTokenEndpoint }}</span>
+          <AppButton v-if="rtConnectionState === 'failed'" size="sm" variant="secondary" @click="reconnectRealtime">
+            重新连接
+          </AppButton>
+        </div>
+        <p v-if="rtError" class="error" role="status">{{ rtError }}</p>
+        <p
+          v-if="rtConnectionState === 'suspended' || rtConnectionState === 'connecting'"
+          class="muted"
+          role="status"
+        >
+          正在重连实时同步…
+        </p>
+
         <div class="video-frame">
           <video ref="videoElement" controls playsinline @timeupdate="position = videoElement?.currentTime ?? 0"></video>
         </div>
@@ -319,8 +413,9 @@ function closeSidebar() {
             <input v-model.number="position" class="ui-input" type="range" min="0" max="7200" :disabled="!canControl" />
           </label>
         </div>
+        <p v-if="controlError" class="error" role="alert">{{ controlError }}</p>
         <p v-if="!canControl" class="hint">普通成员为只读模式，等待房主或管理员同步播放。</p>
-        <p v-else class="hint">你拥有播放控制权限，操作会通过 WebSocket 广播。</p>
+        <p v-else class="hint">你拥有播放控制权限；指令通过 HTTP 接口提交，由服务端经 Ably 广播。</p>
       </AppCard>
 
       <div class="room-sidebar-toggle">
@@ -376,10 +471,14 @@ function closeSidebar() {
       </AppCard>
 
       <AppCard padding="compact">
-        <h3 class="sidebar-heading">在线成员</h3>
-        <div class="member" v-for="member in members" :key="member.id">
+        <h3 class="sidebar-heading">在线成员（Ably Presence）</h3>
+        <div class="member" v-for="member in members" :key="member.connectionId || member.id">
           <span class="avatar">{{ member.username.slice(0, 1).toUpperCase() }}</span>
-          {{ member.username }}
+          <span>
+            {{ member.username }}
+            <small v-if="member.is_owner" class="muted">房主</small>
+            <small v-else-if="member.role === 'admin'" class="muted">管理员</small>
+          </span>
           <AppButton
             v-if="canControl && member.id !== currentUser?.id"
             size="sm"
@@ -389,10 +488,11 @@ function closeSidebar() {
             踢出
           </AppButton>
         </div>
+        <p v-if="!members.length" class="muted">暂无 presence 成员（连接建立后将显示）</p>
       </AppCard>
 
-      <AppCard padding="compact">
-        <h3 class="sidebar-heading">实时事件</h3>
+      <AppCard v-if="isDev" padding="compact">
+        <h3 class="sidebar-heading">实时事件（开发）</h3>
         <pre class="events-pre">{{ eventPreview || '—' }}</pre>
       </AppCard>
     </aside>
@@ -400,6 +500,12 @@ function closeSidebar() {
 </template>
 
 <style scoped>
+.channel-hint {
+  max-width: 14rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 @media (min-width: 961px) {
   .room-sidebar-close {
     display: none;
