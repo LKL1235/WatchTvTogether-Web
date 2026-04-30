@@ -15,7 +15,10 @@ import { useRoomRealtime } from '../composables/useRoomRealtime'
 import { useAuthStore } from '../stores/auth'
 import { formatApiError } from '../utils/errors'
 import { nextInQueueForControl, nextVideoAfterEnd } from '../utils/roomPlayback'
-import { refineRoomStateWithProjection } from '../utils/roomStateProjection'
+import {
+  advancePlayPositionSinceServerUpdatedAt,
+  refineRoomStateWithProjection,
+} from '../utils/roomStateProjection'
 import { waitForVideoReady } from '../utils/waitForVideo'
 import { displayNameForUser } from '../utils/userDisplay'
 import type { PlaybackMode, Room, RoomPresenceMember, RoomSnapshotPayload, RoomState, RoomSocketMessage, Video } from '../types'
@@ -271,12 +274,14 @@ async function refreshAuthoritativeState() {
   const s = await fetchRoomState(auth.accessToken.value, props.room.id)
   const prevVideoId = currentVideo.value
   mergePlaybackFieldsFromRoomState(s)
-  state.value = { ...s, room_id: props.room.id }
+  const merged = { ...s, room_id: props.room.id }
+  const aligned = advancePlayPositionSinceServerUpdatedAt(merged, Date.now(), playbackMode.value)
+  state.value = aligned
   currentVideo.value = s.video_id || ''
   if (!canControl.value && prevVideoId !== (s.video_id || '')) {
     viewerLocalPause.value = false
   }
-  runWithRemoteSync(() => syncPlayerFromState(s.action, s.position))
+  runWithRemoteSync(() => syncPlayerFromState(aligned.action, aligned.position))
 }
 
 async function submitOwnerControl(input: {
@@ -379,9 +384,9 @@ async function applyRoomSnapshot(payload: RoomSnapshotPayload) {
   loadPlaybackSource()
   await nextTick()
   if (state.value) {
-    const refined = refineForNow(state.value)
-    state.value = refined
-    runWithRemoteSync(() => syncPlayerFromState(refined.action, refined.position))
+    const aligned = advancePlayPositionSinceServerUpdatedAt(state.value, Date.now(), playbackMode.value)
+    state.value = aligned
+    runWithRemoteSync(() => syncPlayerFromState(aligned.action, aligned.position))
   }
 }
 

@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest'
 
 import type { RoomState } from '../types'
-import { refineRoomStateWithProjection } from './roomStateProjection'
+import {
+  advancePlayPositionSinceServerUpdatedAt,
+  refineRoomStateWithProjection,
+} from './roomStateProjection'
 
 function baseState(over: Partial<RoomState> = {}): RoomState {
   return {
@@ -12,6 +15,30 @@ function baseState(over: Partial<RoomState> = {}): RoomState {
     ...over,
   }
 }
+
+describe('advancePlayPositionSinceServerUpdatedAt', () => {
+  it('非 play 或缺少 updated_at 时原样返回', () => {
+    const s = baseState({
+      action: 'pause',
+      updated_at: '2020-01-01T00:00:00.000Z',
+    })
+    expect(advancePlayPositionSinceServerUpdatedAt(s, Date.now())).toEqual(s)
+  })
+
+  it('play 时按 position 相对 updated_at 再推进', () => {
+    const anchor = Date.parse('2020-01-01T00:00:00.000Z')
+    const s = baseState({
+      action: 'play',
+      position: 100,
+      updated_at: new Date(anchor).toISOString(),
+      video_duration: 3600,
+      playback_mode: 'sequential',
+    })
+    const out = advancePlayPositionSinceServerUpdatedAt(s, anchor + 2000)
+    expect(out.position).toBeCloseTo(102, 5)
+    expect(out.action).toBe('play')
+  })
+})
 
 describe('refineRoomStateWithProjection', () => {
   it('非 play 或缺少 base_updated_at 时原样返回', () => {
