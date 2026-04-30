@@ -10,7 +10,7 @@ const AUTH_MESSAGE_MAP: Record<string, string> = {
   'email or username already in use': '邮箱或用户名已被占用',
   'invalid email': '邮箱格式不正确',
   'invalid username (use 3-40 chars: a-z, 0-9, _)': '用户名无效（3–40 位，仅小写字母、数字、下划线）',
-  'password does not meet requirements': '密码不符合要求（至少 8 位）',
+  'password does not meet requirements': '密码不符合安全要求，请调整复杂度或避免常见/连续弱密码',
   'too many requests': '请求过于频繁，请稍后再试',
 }
 
