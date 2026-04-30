@@ -37,6 +37,8 @@ let remoteSyncClearTimer: ReturnType<typeof setTimeout> | null = null
 const pendingQueueSubmit = ref(0)
 const autoplayDeniedCount = ref(0)
 const autoplayOverlayHint = ref('')
+/** 观看者本地暂停：与房主状态无关，不参与服务端控制 */
+const viewerLocalPause = ref(false)
 const roomActivityMessage = ref('')
 let roomActivityClearTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -68,6 +70,10 @@ const isRoomOwnerOrAdmin = computed(
 )
 
 const canControl = computed(() => isRoomOwnerOrAdmin.value)
+
+const ownerVideoListeners = computed(() =>
+  canControl.value ? { play: onOwnerPlay, pause: onOwnerPause, seeked: onOwnerSeeked } : {},
+)
 
 const {
   connected: rtConnected,
@@ -251,9 +257,13 @@ function snapshotPassword(): string | undefined {
 
 async function refreshAuthoritativeState() {
   const s = await fetchRoomState(auth.accessToken.value, props.room.id)
+  const prevVideoId = currentVideo.value
   mergePlaybackFieldsFromRoomState(s)
   state.value = { ...s, room_id: props.room.id }
   currentVideo.value = s.video_id || ''
+  if (!canControl.value && prevVideoId !== (s.video_id || '')) {
+    viewerLocalPause.value = false
+  }
   runWithRemoteSync(() => syncPlayerFromState(s.action, s.position))
 }
 
@@ -304,6 +314,7 @@ function applyStateFromSyncMessage(message: RoomSocketMessage) {
     message.playback_mode === 'loop' || message.playback_mode === 'sequential'
       ? message.playback_mode
       : playbackMode.value
+  const prevVideoId = currentVideo.value
   let nextState: RoomState = {
     room_id: props.room.id,
     action: message.action ?? 'pause',
@@ -316,6 +327,9 @@ function applyStateFromSyncMessage(message: RoomSocketMessage) {
   }
   playbackMode.value = nextMode
   currentVideo.value = nextState.video_id ?? ''
+  if (!canControl.value && prevVideoId !== (nextState.video_id ?? '')) {
+    viewerLocalPause.value = false
+  }
   nextState = refineForNow(nextState)
   state.value = nextState
   mergePlaybackFieldsFromRoomState(nextState)
@@ -332,9 +346,13 @@ async function applyRoomSnapshot(payload: RoomSnapshotPayload) {
 
   if (payload.state) {
     const s = payload.state
+    const prevVideoId = currentVideo.value
     state.value = { ...s, room_id: payload.room_id }
     mergePlaybackFieldsFromRoomState(state.value)
     currentVideo.value = s.video_id || ''
+    if (!canControl.value && prevVideoId !== (s.video_id || '')) {
+      viewerLocalPause.value = false
+    }
   }
   const topQueue = Array.isArray(payload.queue) ? payload.queue : []
   const stateQ = payload.state?.queue
@@ -472,6 +490,11 @@ async function syncPlayerFromState(action: RoomSocketMessage['action'], nextPosi
     video.pause()
     return
   }
+  // 房主仍在播放，但观看者选择了本地暂停：只对齐进度，不自动播放
+  if (!canControl.value && viewerLocalPause.value) {
+    video.pause()
+    return
+  }
   if (action === 'seek') {
     if (canControl.value) {
       void video.play().catch(() => undefined)
@@ -520,6 +543,7 @@ function onRoomClosed() {
 }
 
 async function onSyncProgressClick() {
+  viewerLocalPause.value = false
   await resyncPlaybackFromServer()
   const v = videoElement.value
   const s = state.value
@@ -531,6 +555,29 @@ async function onSyncProgressClick() {
       autoplayDeniedCount.value++
     }
   }
+}
+
+/** 观看者：先按服务端对齐进度，再本地播放（不调用房主控制 API） */
+async function onViewerPlayClick() {
+  viewerLocalPause.value = false
+  await resyncPlaybackFromServer()
+  const v = videoElement.value
+  const s = state.value
+  if (v && s && s.action === 'play') {
+    try {
+      await v.play()
+      autoplayDeniedCount.value = 0
+    } catch {
+      autoplayDeniedCount.value++
+    }
+  }
+}
+
+/** 观看者：仅暂停本客户端，不改变房间状态 */
+function onViewerPauseClick() {
+  viewerLocalPause.value = true
+  const v = videoElement.value
+  if (v) v.pause()
 }
 
 function onOwnerPlay() {
@@ -698,13 +745,6 @@ function setViewerVolume(e: Event) {
   const t = e.target as HTMLInputElement
   v.volume = Number(t.value)
 }
-
-function viewerFullscreen() {
-  const v = videoElement.value
-  if (!v) return
-  const fs = v.requestFullscreen
-  if (typeof fs === 'function') void fs.call(v)
-}
 </script>
 
 <template>
@@ -744,32 +784,30 @@ function viewerFullscreen() {
         <div class="video-frame video-frame--stacked">
           <div class="video-frame__stack">
             <video
-              v-if="canControl"
               ref="videoElement"
-              controls
+              :controls="canControl"
               playsinline
-              @play="onOwnerPlay"
-              @pause="onOwnerPause"
-              @seeked="onOwnerSeeked"
+              v-on="ownerVideoListeners"
               @ended="onVideoEnded"
             />
-            <template v-else>
-              <video ref="videoElement" playsinline @ended="onVideoEnded" />
-              <div
-                v-if="showAutoplayBlockedOverlay"
-                class="autoplay-blocked-overlay"
-                role="dialog"
-                aria-label="自动播放被阻止"
-              >
-                <p class="autoplay-blocked-overlay__title">房间正在播放，浏览器阻止了自动播放</p>
-                <p v-if="autoplayOverlayHint" class="autoplay-blocked-overlay__hint muted">{{ autoplayOverlayHint }}</p>
-                <AppButton variant="primary" type="button" @click="onSyncProgressClick">同步进度</AppButton>
-              </div>
-            </template>
+            <div
+              v-if="!canControl && showAutoplayBlockedOverlay"
+              class="autoplay-blocked-overlay"
+              role="dialog"
+              aria-label="自动播放被阻止"
+            >
+              <p class="autoplay-blocked-overlay__title">房间正在播放，浏览器阻止了自动播放</p>
+              <p v-if="autoplayOverlayHint" class="autoplay-blocked-overlay__hint muted">{{ autoplayOverlayHint }}</p>
+              <AppButton variant="primary" type="button" @click="onSyncProgressClick">同步进度</AppButton>
+            </div>
           </div>
           <div v-if="!canControl" class="viewer-chrome">
-            <p class="viewer-chrome__hint">观看模式：播放与进度由房主同步；你可调节本地音量、静音与全屏。</p>
-            <div class="viewer-chrome__row">
+            <p class="viewer-chrome__hint">
+              观看模式：进度与切视频由房主同步。控制栏仅含播放/暂停与音量；点击「播放」会先向服务端同步进度。暂停与音量仅作用于本机。
+            </p>
+            <div class="viewer-chrome__row viewer-chrome__row--controls">
+              <AppButton size="sm" variant="primary" type="button" @click="onViewerPlayClick">播放</AppButton>
+              <AppButton size="sm" variant="secondary" type="button" @click="onViewerPauseClick">暂停</AppButton>
               <label class="viewer-chrome__label">
                 音量
                 <input
@@ -785,7 +823,6 @@ function viewerFullscreen() {
               <AppButton size="sm" variant="secondary" type="button" @click="toggleViewerMute">
                 {{ videoElement?.muted ? '取消静音' : '静音' }}
               </AppButton>
-              <AppButton size="sm" variant="secondary" type="button" @click="viewerFullscreen">全屏</AppButton>
             </div>
           </div>
         </div>
@@ -962,6 +999,9 @@ function viewerFullscreen() {
   flex-wrap: wrap;
   gap: 0.5rem;
   align-items: center;
+}
+.viewer-chrome__row--controls {
+  align-items: flex-end;
 }
 .viewer-chrome__label {
   display: flex;
