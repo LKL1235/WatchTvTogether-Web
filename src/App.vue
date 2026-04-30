@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, provide, ref } from 'vue'
 import { useAuthStore } from './stores/auth'
 import AppButton from './components/ui/AppButton.vue'
 import AuthView from './views/AuthView.vue'
@@ -13,21 +13,40 @@ const currentRoom = ref<Room | null>(null)
 const currentJoinPassword = ref('')
 const showAdmin = ref(false)
 const isAdmin = computed(() => auth.user.value?.role === 'admin')
+/** 从房间返回大厅时递增，驱动大厅刷新房间列表（空房清理后列表一致） */
+const lobbyListTick = ref(0)
+provide('lobbyListTick', lobbyListTick)
+
+const lobbyToast = ref('')
+let lobbyToastTimer: ReturnType<typeof setTimeout> | null = null
+
+function showLobbyToast(text: string) {
+  lobbyToast.value = text
+  if (lobbyToastTimer) clearTimeout(lobbyToastTimer)
+  lobbyToastTimer = setTimeout(() => {
+    lobbyToast.value = ''
+    lobbyToastTimer = null
+  }, 4500)
+}
 
 function goLobby() {
   currentRoom.value = null
   currentJoinPassword.value = ''
   showAdmin.value = false
+  lobbyListTick.value++
 }
 
 function goAdmin() {
   showAdmin.value = true
 }
 
-function openRoomFromLobby(room: Room, joinPassword?: string) {
+function openRoomFromLobby(room: Room, joinPassword?: string, leftRoomId?: string) {
   currentRoom.value = room
   currentJoinPassword.value = joinPassword ?? ''
   showAdmin.value = false
+  if (leftRoomId) {
+    showLobbyToast('已自动离开之前的房间，并进入当前房间。')
+  }
 }
 
 function openRoomFromAdmin(room: Room) {
@@ -61,12 +80,14 @@ onMounted(() => {
     </header>
 
     <div class="app-main">
+      <p v-if="lobbyToast" class="lobby-toast" role="status">{{ lobbyToast }}</p>
       <AdminView v-if="showAdmin" @open-room="openRoomFromAdmin" />
       <RoomView
         v-else-if="currentRoom"
         :room="currentRoom"
         :join-password="currentJoinPassword || undefined"
         @back="goLobby"
+        @admin-rooms-changed="() => lobbyListTick++"
       />
       <LobbyView v-else @open-room="openRoomFromLobby" />
     </div>

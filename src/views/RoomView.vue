@@ -3,6 +3,7 @@ import Hls from 'hls.js'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   API_BASE,
+  ApiError,
   fetchRoomSnapshot,
   fetchRoomState,
   fetchVideo,
@@ -14,6 +15,8 @@ import { useRoomRealtime } from '../composables/useRoomRealtime'
 import { useAuthStore } from '../stores/auth'
 import { formatApiError } from '../utils/errors'
 import { nextInQueueForControl, nextVideoAfterEnd } from '../utils/roomPlayback'
+import { refineRoomStateWithProjection } from '../utils/roomStateProjection'
+import { waitForVideoReady } from '../utils/waitForVideo'
 import type { PlaybackMode, Room, RoomSnapshotPayload, RoomState, RoomSocketMessage, Video } from '../types'
 import AppButton from '../components/ui/AppButton.vue'
 import AppCard from '../components/ui/AppCard.vue'
@@ -23,7 +26,7 @@ const props = defineProps<{
   /** 仅运行期：普通成员进入私有房时由大厅传入，供 Ably 续签与 snapshot，不持久化 */
   joinPassword?: string
 }>()
-const emit = defineEmits<{ back: [] }>()
+const emit = defineEmits<{ back: []; 'admin-rooms-changed': [] }>()
 const auth = useAuthStore()
 const state = ref<RoomState | null>(null)
 const playbackMode = ref<PlaybackMode>('sequential')
@@ -32,6 +35,19 @@ const serverControlVersion = ref(0)
 const applyingRemoteSync = ref(false)
 let remoteSyncClearTimer: ReturnType<typeof setTimeout> | null = null
 const pendingQueueSubmit = ref(0)
+const autoplayDeniedCount = ref(0)
+const autoplayOverlayHint = ref('')
+const roomActivityMessage = ref('')
+let roomActivityClearTimer: ReturnType<typeof setTimeout> | null = null
+
+function showRoomActivity(text: string) {
+  roomActivityMessage.value = text
+  if (roomActivityClearTimer) clearTimeout(roomActivityClearTimer)
+  roomActivityClearTimer = setTimeout(() => {
+    roomActivityMessage.value = ''
+    roomActivityClearTimer = null
+  }, 5000)
+}
 
 const currentVideo = ref(props.room.current_video_id || '')
 const manualUrl = ref('')
@@ -77,6 +93,28 @@ watch(
   (v) => {
     runtimeRoomPassword.value = v ?? ''
   },
+)
+
+watch(
+  () => autoplayDeniedCount.value,
+  (n) => {
+    if (!canControl.value && n > 0) {
+      autoplayOverlayHint.value =
+        n > 1 ? '请先点击播放器区域或尝试取消静音，再点「同步进度」。' : ''
+    } else {
+      autoplayOverlayHint.value = ''
+    }
+  },
+)
+
+watch(rtConnectionState, (s, prev) => {
+  if (s === 'connected' && prev && prev !== 'connected' && !rtConnecting.value) {
+    void resyncPlaybackFromServer()
+  }
+})
+
+const showAutoplayBlockedOverlay = computed(
+  () => !canControl.value && autoplayDeniedCount.value > 0 && state.value?.action === 'play',
 )
 
 const connectionStatusLabel = computed(() => {
@@ -185,21 +223,18 @@ function mergePlaybackFieldsFromRoomState(s: RoomState) {
   }
 }
 
-function runWithRemoteSync(fn: () => void) {
+function runWithRemoteSync(fn: () => void | Promise<void>) {
   applyingRemoteSync.value = true
   if (remoteSyncClearTimer) {
     clearTimeout(remoteSyncClearTimer)
     remoteSyncClearTimer = null
   }
-  try {
-    fn()
-  } finally {
-    // play() 可能异步触发原生 play 事件，短延迟后再允许房主控制上报
+  void Promise.resolve(fn()).finally(() => {
     remoteSyncClearTimer = setTimeout(() => {
       applyingRemoteSync.value = false
       remoteSyncClearTimer = null
-    }, 280)
-  }
+    }, 320)
+  })
 }
 
 function getVideoTime(): number {
@@ -208,12 +243,18 @@ function getVideoTime(): number {
   return Number(state.value?.position ?? 0)
 }
 
+function snapshotPassword(): string | undefined {
+  if (isRoomOwnerOrAdmin.value || props.room.visibility === 'public') return undefined
+  const p = runtimeRoomPassword.value.trim()
+  return p || undefined
+}
+
 async function refreshAuthoritativeState() {
   const s = await fetchRoomState(auth.accessToken.value, props.room.id)
   mergePlaybackFieldsFromRoomState(s)
   state.value = { ...s, room_id: props.room.id }
   currentVideo.value = s.video_id || ''
-  runWithRemoteSync(() => syncPlayer(s.action, s.position))
+  runWithRemoteSync(() => syncPlayerFromState(s.action, s.position))
 }
 
 async function submitOwnerControl(input: {
@@ -244,13 +285,7 @@ async function submitOwnerControl(input: {
   } catch (err) {
     controlError.value = formatApiError(err, '同步失败')
     try {
-      const snap = await fetchRoomSnapshot(
-        auth.accessToken.value,
-        props.room.id,
-        isRoomOwnerOrAdmin.value || props.room.visibility === 'public'
-          ? undefined
-          : runtimeRoomPassword.value,
-      )
+      const snap = await fetchRoomSnapshot(auth.accessToken.value, props.room.id, snapshotPassword())
       await applyRoomSnapshot(snap)
     } catch {
       // ignore secondary failure
@@ -259,24 +294,32 @@ async function submitOwnerControl(input: {
   }
 }
 
+function refineForNow(s: RoomState): RoomState {
+  return refineRoomStateWithProjection(s, Date.now(), playbackMode.value)
+}
+
 function applyStateFromSyncMessage(message: RoomSocketMessage) {
   const ts = message.timestamp ?? Date.now() / 1000
   const nextMode =
     message.playback_mode === 'loop' || message.playback_mode === 'sequential'
       ? message.playback_mode
       : playbackMode.value
-  state.value = {
+  let nextState: RoomState = {
     room_id: props.room.id,
     action: message.action ?? 'pause',
     position: message.position ?? 0,
     video_id: message.video_id ?? '',
     queue: message.queue,
     playback_mode: nextMode,
+    control_version: message.control_version,
     updated_at: new Date(ts * 1000).toISOString(),
   }
   playbackMode.value = nextMode
-  currentVideo.value = state.value.video_id ?? ''
-  runWithRemoteSync(() => syncPlayer(message.action ?? 'pause', state.value!.position))
+  currentVideo.value = nextState.video_id ?? ''
+  nextState = refineForNow(nextState)
+  state.value = nextState
+  mergePlaybackFieldsFromRoomState(nextState)
+  runWithRemoteSync(() => syncPlayerFromState(nextState.action, nextState.position))
 }
 
 async function applyRoomSnapshot(payload: RoomSnapshotPayload) {
@@ -304,18 +347,19 @@ async function applyRoomSnapshot(payload: RoomSnapshotPayload) {
   }
   await nextTick()
   loadPlaybackSource()
+  await nextTick()
   if (state.value) {
-    runWithRemoteSync(() => syncPlayer(state.value!.action, state.value!.position))
+    const refined = refineForNow(state.value)
+    state.value = refined
+    runWithRemoteSync(() => syncPlayerFromState(refined.action, refined.position))
   }
 }
 
 onMounted(async () => {
   roomLoadError.value = ''
   try {
-    const pwd =
-      isRoomOwnerOrAdmin.value || props.room.visibility === 'public' ? undefined : runtimeRoomPassword.value
     const [snapshot, videos] = await Promise.all([
-      fetchRoomSnapshot(auth.accessToken.value, props.room.id, pwd),
+      fetchRoomSnapshot(auth.accessToken.value, props.room.id, snapshotPassword()),
       fetchVideos(auth.accessToken.value, { status: 'ready' }),
     ])
     library.value = videos.items
@@ -325,10 +369,13 @@ onMounted(async () => {
       return
     }
     connectRealtime()
-    await nextTick()
-    loadPlaybackSource()
   } catch (err) {
-    roomLoadError.value = formatApiError(err, '加载房间失败')
+    if (err instanceof ApiError && err.status === 404) {
+      roomLoadError.value = '房间已关闭或不存在'
+      emit('admin-rooms-changed')
+    } else {
+      roomLoadError.value = formatApiError(err, '加载房间失败')
+    }
   }
 })
 
@@ -336,6 +383,10 @@ onBeforeUnmount(() => {
   if (remoteSyncClearTimer) {
     clearTimeout(remoteSyncClearTimer)
     remoteSyncClearTimer = null
+  }
+  if (roomActivityClearTimer) {
+    clearTimeout(roomActivityClearTimer)
+    roomActivityClearTimer = null
   }
   hls?.destroy()
   disconnectRealtime()
@@ -360,6 +411,22 @@ watch(rtLastMessage, (message) => {
   }
   if (message.type === 'room_event' && message.user) {
     const u = message.user
+    const selfId = currentUser.value?.id
+    const isSelf = Boolean(selfId && u.id === selfId)
+    const name = u.username || '某用户'
+
+    if (message.event === 'user_joined' && !isSelf) {
+      showRoomActivity(`${name} 已加入房间`)
+    }
+    if (message.event === 'user_left' && !isSelf) {
+      showRoomActivity(`${name} 已离开房间`)
+    }
+    if (message.event === 'user_left' && isSelf) {
+      window.alert('你已加入其他房间，当前房间已退出。')
+      emit('back')
+      return
+    }
+
     if (message.event === 'user_kicked' && currentUser.value && u.id === currentUser.value.id) {
       window.alert('你已被移出该房间')
       emit('back')
@@ -367,11 +434,11 @@ watch(rtLastMessage, (message) => {
   }
   if (message.type === 'room_event' && message.event === 'room_deleted') {
     window.alert('房间已删除')
+    emit('admin-rooms-changed')
     emit('back')
   }
   if (message.type === 'room_event' && message.event === 'room_closed') {
-    window.alert('房间已关闭')
-    emit('back')
+    onRoomClosed()
   }
 })
 
@@ -393,17 +460,76 @@ function loadPlaybackSource() {
   video.load()
 }
 
-function syncPlayer(action: RoomSocketMessage['action'], nextPosition: number) {
+async function syncPlayerFromState(action: RoomSocketMessage['action'], nextPosition: number) {
   const video = videoElement.value
   if (!video) return
+  await waitForVideoReady(video)
   if (Number.isFinite(nextPosition)) {
     video.currentTime = nextPosition
   }
-  if (action === 'play') {
-    video.play().catch(() => undefined)
-  }
   if (action === 'pause') {
+    autoplayDeniedCount.value = 0
     video.pause()
+    return
+  }
+  if (action === 'seek') {
+    if (canControl.value) {
+      void video.play().catch(() => undefined)
+    } else {
+      try {
+        await video.play()
+        autoplayDeniedCount.value = 0
+      } catch {
+        autoplayDeniedCount.value++
+      }
+    }
+    return
+  }
+  if (action === 'play' || action === 'next' || action === 'switch') {
+    if (canControl.value) {
+      autoplayDeniedCount.value = 0
+      void video.play().catch(() => undefined)
+      return
+    }
+    try {
+      await video.play()
+      autoplayDeniedCount.value = 0
+    } catch {
+      autoplayDeniedCount.value++
+    }
+  }
+}
+
+async function resyncPlaybackFromServer() {
+  if (!canControl.value) {
+    try {
+      const snap = await fetchRoomSnapshot(auth.accessToken.value, props.room.id, snapshotPassword())
+      await applyRoomSnapshot(snap)
+    } catch {
+      await refreshAuthoritativeState()
+    }
+  } else {
+    await refreshAuthoritativeState()
+  }
+}
+
+function onRoomClosed() {
+  window.alert('房间已关闭')
+  emit('admin-rooms-changed')
+  emit('back')
+}
+
+async function onSyncProgressClick() {
+  await resyncPlaybackFromServer()
+  const v = videoElement.value
+  const s = state.value
+  if (v && s && s.action === 'play') {
+    try {
+      await v.play()
+      autoplayDeniedCount.value = 0
+    } catch {
+      autoplayDeniedCount.value++
+    }
   }
 }
 
@@ -613,42 +739,55 @@ function viewerFullscreen() {
         >
           正在重连实时同步…
         </p>
+        <p v-if="roomActivityMessage" class="room-activity-toast" role="status">{{ roomActivityMessage }}</p>
 
-        <div class="video-frame">
-          <video
-            v-if="canControl"
-            ref="videoElement"
-            controls
-            playsinline
-            @play="onOwnerPlay"
-            @pause="onOwnerPause"
-            @seeked="onOwnerSeeked"
-            @ended="onVideoEnded"
-          />
-          <template v-else>
-            <video ref="videoElement" playsinline @ended="onVideoEnded" />
-            <div class="viewer-chrome">
-              <p class="viewer-chrome__hint">观看模式：播放与进度由房主同步；你可调节本地音量、静音与全屏。</p>
-              <div class="viewer-chrome__row">
-                <label class="viewer-chrome__label">
-                  音量
-                  <input
-                    class="ui-input"
-                    type="range"
-                    min="0"
-                    max="1"
-                    step="0.05"
-                    :value="videoElement?.volume ?? 1"
-                    @input="setViewerVolume"
-                  />
-                </label>
-                <AppButton size="sm" variant="secondary" type="button" @click="toggleViewerMute">
-                  {{ videoElement?.muted ? '取消静音' : '静音' }}
-                </AppButton>
-                <AppButton size="sm" variant="secondary" type="button" @click="viewerFullscreen">全屏</AppButton>
+        <div class="video-frame video-frame--stacked">
+          <div class="video-frame__stack">
+            <video
+              v-if="canControl"
+              ref="videoElement"
+              controls
+              playsinline
+              @play="onOwnerPlay"
+              @pause="onOwnerPause"
+              @seeked="onOwnerSeeked"
+              @ended="onVideoEnded"
+            />
+            <template v-else>
+              <video ref="videoElement" playsinline @ended="onVideoEnded" />
+              <div
+                v-if="showAutoplayBlockedOverlay"
+                class="autoplay-blocked-overlay"
+                role="dialog"
+                aria-label="自动播放被阻止"
+              >
+                <p class="autoplay-blocked-overlay__title">房间正在播放，浏览器阻止了自动播放</p>
+                <p v-if="autoplayOverlayHint" class="autoplay-blocked-overlay__hint muted">{{ autoplayOverlayHint }}</p>
+                <AppButton variant="primary" type="button" @click="onSyncProgressClick">同步进度</AppButton>
               </div>
+            </template>
+          </div>
+          <div v-if="!canControl" class="viewer-chrome">
+            <p class="viewer-chrome__hint">观看模式：播放与进度由房主同步；你可调节本地音量、静音与全屏。</p>
+            <div class="viewer-chrome__row">
+              <label class="viewer-chrome__label">
+                音量
+                <input
+                  class="ui-input"
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.05"
+                  :value="videoElement?.volume ?? 1"
+                  @input="setViewerVolume"
+                />
+              </label>
+              <AppButton size="sm" variant="secondary" type="button" @click="toggleViewerMute">
+                {{ videoElement?.muted ? '取消静音' : '静音' }}
+              </AppButton>
+              <AppButton size="sm" variant="secondary" type="button" @click="viewerFullscreen">全屏</AppButton>
             </div>
-          </template>
+          </div>
         </div>
         <p class="muted">当前视频：{{ selectedVideo?.title || currentVideo || '尚未选择视频' }}</p>
         <p v-if="controlError" class="error" role="alert">{{ controlError }}</p>
@@ -754,6 +893,46 @@ function viewerFullscreen() {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.room-activity-toast {
+  margin: 0.5rem 0 0;
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.5rem;
+  background: rgba(34, 197, 94, 0.12);
+  border: 1px solid rgba(34, 197, 94, 0.35);
+  font-size: 0.875rem;
+}
+.video-frame--stacked {
+  display: flex;
+  flex-direction: column;
+}
+.video-frame__stack {
+  position: relative;
+}
+.autoplay-blocked-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  padding: 1rem;
+  text-align: center;
+  background: rgba(2, 6, 23, 0.72);
+  color: #f8fafc;
+  z-index: 2;
+}
+.autoplay-blocked-overlay__title {
+  margin: 0;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  max-width: 22rem;
+}
+.autoplay-blocked-overlay__hint {
+  margin: 0;
+  font-size: 0.8125rem;
+  max-width: 22rem;
 }
 .playback-mode-row {
   display: flex;

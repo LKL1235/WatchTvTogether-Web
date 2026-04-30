@@ -48,6 +48,15 @@ a {
   padding: var(--space-lg) 0 var(--space-3xl);
 }
 
+.lobby-toast {
+  margin: 0 0 var(--space-md);
+  padding: var(--space-sm) var(--space-md);
+  border-radius: var(--radius-md);
+  background: rgba(56, 189, 248, 0.15);
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  font-size: var(--text-sm);
+}
+
 @media (max-width: 640px) {
   .app-main {
     width: calc(100% - var(--space-xl));
