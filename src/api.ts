@@ -2,8 +2,6 @@ import type {
   AblyJwtResponse,
   AdminRoomRow,
   AuthTokens,
-  CapabilityReport,
-  DownloadTask,
   JoinRoomResult,
   PlaybackAction,
   PlaybackMode,
@@ -248,29 +246,6 @@ export function deleteVideo(token: string, id: string) {
   return apiFetch<void>(`/api/admin/videos/${id}`, { method: 'DELETE' }, token)
 }
 
-export function fetchDownloads(token: string) {
-  return apiFetch<{ items: DownloadTask[] }>('/api/admin/downloads', {}, token)
-}
-
-export function createDownload(token: string, sourceUrl: string) {
-  return apiFetch<DownloadTask>(
-    '/api/admin/downloads',
-    {
-      method: 'POST',
-      body: JSON.stringify({ source_url: sourceUrl }),
-    },
-    token,
-  )
-}
-
-export function cancelDownload(token: string, taskId: string) {
-  return apiFetch<void>(`/api/admin/downloads/${taskId}`, { method: 'DELETE' }, token)
-}
-
 export function kickRoomMember(token: string, roomId: string, userId: string) {
   return apiFetch<void>(`/api/rooms/${roomId}/kick/${userId}`, { method: 'POST' }, token)
-}
-
-export function fetchCapabilities(token: string) {
-  return apiFetch<CapabilityReport>('/api/capabilities', {}, token)
 }

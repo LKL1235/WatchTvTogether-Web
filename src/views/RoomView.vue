@@ -139,16 +139,29 @@ const selectedVideo = computed(
     queue.value.find((item) => item.id === currentVideo.value) ??
     library.value.find((item) => item.id === currentVideo.value),
 )
+
+/** 与 Vercel 无本机文件场景对齐：优先外链 / `source_url`，其次 `/api/...` 相对路径 */
+function resolveVideoPlaybackUrl(video: Video): string {
+  const direct = video.file_url?.trim() || video.source_url?.trim()
+  if (direct) {
+    if (direct.startsWith('http://') || direct.startsWith('https://') || direct.startsWith('//')) {
+      return direct
+    }
+    if (direct.startsWith('/')) return `${API_BASE}${direct}`
+    return direct
+  }
+  const rel = video.file_path?.trim()
+  if (rel) {
+    if (rel.startsWith('http://') || rel.startsWith('https://') || rel.startsWith('//')) return rel
+    if (rel.startsWith('/')) return `${API_BASE}${rel}`
+    return `${API_BASE}/${rel.replace(/^\//, '')}`
+  }
+  return `${API_BASE}/api/videos/${encodeURIComponent(video.id)}/file`
+}
+
 const playbackUrl = computed(() => {
   if (!selectedVideo.value) return currentVideo.value
-  const raw = selectedVideo.value.file_url || `/api/videos/${selectedVideo.value.id}/file`
-  if (raw.startsWith('http://') || raw.startsWith('https://') || raw.startsWith('//')) {
-    return raw
-  }
-  if (raw.startsWith('/')) {
-    return `${API_BASE}${raw}`
-  }
-  return raw
+  return resolveVideoPlaybackUrl(selectedVideo.value)
 })
 
 const roomLoadError = ref('')
@@ -196,12 +209,10 @@ async function videoFromQueueId(id: string, token: string): Promise<Video | null
     }
     return v
   } catch {
-    const rel = `/api/videos/${id}/file`
     return {
       id,
       title: `未知视频 (${id.slice(0, 8)}…)`,
-      file_path: '',
-      file_url: `${API_BASE}${rel}`,
+      file_path: `/api/videos/${encodeURIComponent(id)}/file`,
       duration: 0,
       format: '',
       size: 0,
@@ -469,11 +480,19 @@ function loadPlaybackSource() {
   hls?.destroy()
   hls = null
   const url = playbackUrl.value
-  if (url.endsWith('.m3u8') && Hls.isSupported()) {
-    hls = new Hls()
-    hls.loadSource(url)
-    hls.attachMedia(video)
-    return
+  const looksLikeHls = url.endsWith('.m3u8') || /\.m3u8(\?|$)/i.test(url)
+  if (looksLikeHls) {
+    if (Hls.isSupported()) {
+      hls = new Hls()
+      hls.loadSource(url)
+      hls.attachMedia(video)
+      return
+    }
+    if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      video.src = url
+      video.load()
+      return
+    }
   }
   video.src = url
   video.load()
