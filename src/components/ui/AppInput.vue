@@ -9,6 +9,7 @@ defineProps<{
   disabled?: boolean
   required?: boolean
   minlength?: number
+  maxlength?: number
   placeholder?: string
   id?: string
 }>()
@@ -34,6 +35,7 @@ function onInput(e: Event) {
       :disabled="disabled"
       :required="required"
       :minlength="minlength"
+      :maxlength="maxlength"
       :placeholder="placeholder"
       @input="onInput"
     />

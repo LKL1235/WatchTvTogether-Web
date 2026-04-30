@@ -1,5 +1,5 @@
 import type {
-  AblyTokenDetails,
+  AblyJwtResponse,
   AdminRoomRow,
   AuthTokens,
   CapabilityReport,
@@ -7,6 +7,7 @@ import type {
   JoinRoomResult,
   PlaybackAction,
   PlaybackMode,
+  RegisterCodeResponse,
   Room,
   RoomSnapshotPayload,
   RoomSocketMessage,
@@ -18,6 +19,9 @@ import type {
 export const API_BASE = import.meta.env.VITE_API_BASE ?? 'https://watchtvtogether.bestlkl.top'
 
 export class ApiError extends Error {
+  /** HTTP `Retry-After`（秒），常见于验证码冷却或限流 */
+  retryAfterSeconds?: number
+
   constructor(
     message: string,
     public status: number,
@@ -43,7 +47,13 @@ export async function apiFetch<T>(path: string, options: RequestInit = {}, token
     } catch {
       // Keep HTTP status text when the server returned no JSON body.
     }
-    throw new ApiError(message, response.status)
+    const err = new ApiError(message, response.status)
+    const ra = response.headers.get('Retry-After')
+    if (ra) {
+      const sec = Number.parseInt(ra, 10)
+      if (!Number.isNaN(sec) && sec > 0) err.retryAfterSeconds = sec
+    }
+    throw err
   }
   if (response.status === 204) {
     return undefined as T
@@ -51,17 +61,52 @@ export async function apiFetch<T>(path: string, options: RequestInit = {}, token
   return (await response.json()) as T
 }
 
-export function register(input: { username: string; password: string; nickname?: string }) {
+export function sendRegisterVerificationCode(email: string) {
+  return apiFetch<RegisterCodeResponse>('/api/auth/register/code', {
+    method: 'POST',
+    body: JSON.stringify({ email }),
+  })
+}
+
+export function sendPasswordResetCode(email: string) {
+  return apiFetch<RegisterCodeResponse>('/api/auth/password/reset/code', {
+    method: 'POST',
+    body: JSON.stringify({ email }),
+  })
+}
+
+export function resetPassword(input: { email: string; code: string; new_password: string }) {
+  return apiFetch<void>('/api/auth/password/reset', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  })
+}
+
+export function register(input: {
+  email: string
+  username: string
+  password: string
+  code: string
+  nickname?: string
+  avatar_url?: string
+}) {
   return apiFetch<{ user: User; tokens: AuthTokens }>('/api/auth/register', {
     method: 'POST',
     body: JSON.stringify(input),
   })
 }
 
-export function login(input: { username: string; password: string }) {
+export function login(input: { login: string; password: string }) {
   return apiFetch<{ user: User; tokens: AuthTokens }>('/api/auth/login', {
     method: 'POST',
     body: JSON.stringify(input),
+  })
+}
+
+export function refreshSession(refresh_token: string) {
+  return apiFetch<{ tokens: AuthTokens }>('/api/auth/refresh', {
+    method: 'POST',
+    body: JSON.stringify({ refresh_token }),
   })
 }
 
@@ -126,7 +171,7 @@ export function fetchAblyToken(
   token: string,
   input: { room_id: string; purpose: 'room'; password?: string },
 ) {
-  return apiFetch<AblyTokenDetails>(
+  return apiFetch<AblyJwtResponse>(
     '/api/ably/token',
     {
       method: 'POST',

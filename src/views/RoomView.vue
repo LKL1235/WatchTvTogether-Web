@@ -17,7 +17,8 @@ import { formatApiError } from '../utils/errors'
 import { nextInQueueForControl, nextVideoAfterEnd } from '../utils/roomPlayback'
 import { refineRoomStateWithProjection } from '../utils/roomStateProjection'
 import { waitForVideoReady } from '../utils/waitForVideo'
-import type { PlaybackMode, Room, RoomSnapshotPayload, RoomState, RoomSocketMessage, Video } from '../types'
+import { displayNameForUser } from '../utils/userDisplay'
+import type { PlaybackMode, Room, RoomPresenceMember, RoomSnapshotPayload, RoomState, RoomSocketMessage, Video } from '../types'
 import AppButton from '../components/ui/AppButton.vue'
 import AppCard from '../components/ui/AppCard.vue'
 
@@ -431,7 +432,7 @@ watch(rtLastMessage, (message) => {
     const u = message.user
     const selfId = currentUser.value?.id
     const isSelf = Boolean(selfId && u.id === selfId)
-    const name = u.username || '某用户'
+    const name = displayNameForUser(u) || '某用户'
 
     if (message.event === 'user_joined' && !isSelf) {
       showRoomActivity(`${name} 已加入房间`)
@@ -715,7 +716,7 @@ async function ownerNextTrack() {
   await submitOwnerControl({ action: 'next', position: 0, video_id: cur, queue: q })
 }
 
-async function kick(member: { id: string; username: string }) {
+async function kick(member: RoomPresenceMember) {
   if (!canControl.value) return
   try {
     await kickRoomMember(auth.accessToken.value, props.room.id, member.id)
@@ -898,9 +899,10 @@ function setViewerVolume(e: Event) {
       <AppCard padding="compact">
         <h3 class="sidebar-heading">在线成员（Ably Presence）</h3>
         <div class="member" v-for="member in members" :key="member.connectionId || member.id">
-          <span class="avatar">{{ member.username.slice(0, 1).toUpperCase() }}</span>
+          <span class="avatar">{{ displayNameForUser(member).slice(0, 1).toUpperCase() }}</span>
           <span>
-            {{ member.username }}
+            {{ displayNameForUser(member) }}
+            <small class="muted">@{{ member.username }}</small>
             <small v-if="member.is_owner" class="muted">房主</small>
             <small v-else-if="member.role === 'admin'" class="muted">管理员</small>
           </span>
