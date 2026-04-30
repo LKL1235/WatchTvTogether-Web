@@ -98,6 +98,21 @@ async function confirmJoin() {
 }
 
 async function openRoom(room: Room) {
+  const uid = auth.user.value?.id
+  /** 与后端 canManageRoom 一致：房主或站点管理员访问私有房无需密码 */
+  const canSkipPrivatePassword =
+    auth.user.value?.role === 'admin' || room.is_owner === true || (!!uid && room.owner_id === uid)
+
+  if (room.visibility === 'private' && canSkipPrivatePassword) {
+    try {
+      const joined = await joinRoom(auth.accessToken.value, room.id)
+      emit('open-room', joined)
+    } catch {
+      openJoinModal(room)
+    }
+    return
+  }
+
   if (room.visibility === 'private') {
     openJoinModal(room)
     return
@@ -117,8 +132,22 @@ onMounted(loadRooms)
   <div class="lobby-grid">
     <AppCard hover>
       <template #header>
-        <p class="eyebrow">大厅</p>
-        <h2 class="section-title">房间列表</h2>
+        <div class="lobby-card-header">
+          <div>
+            <p class="eyebrow">大厅</p>
+            <h2 class="section-title">房间列表</h2>
+          </div>
+          <AppButton
+            variant="secondary"
+            size="sm"
+            type="button"
+            :loading="loading"
+            :disabled="loading"
+            @click="loadRooms"
+          >
+            刷新
+          </AppButton>
+        </div>
       </template>
       <p v-if="error" class="error" role="alert">{{ error }}</p>
       <div v-if="loading" class="muted" aria-live="polite">正在加载房间…</div>
@@ -189,3 +218,13 @@ onMounted(loadRooms)
     </template>
   </AppModal>
 </template>
+
+<style scoped>
+.lobby-card-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+</style>
