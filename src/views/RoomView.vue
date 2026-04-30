@@ -7,7 +7,6 @@ import {
   fetchRoomSnapshot,
   fetchRoomState,
   fetchVideo,
-  fetchVideos,
   kickRoomMember,
   sendRoomControl,
 } from '../api'
@@ -21,9 +20,13 @@ import {
 } from '../utils/roomStateProjection'
 import { waitForVideoReady } from '../utils/waitForVideo'
 import { displayNameForUser } from '../utils/userDisplay'
+import { clampDisplayTitle, shortTitleFromUrl } from '../utils/queueDisplay'
 import type { PlaybackMode, Room, RoomPresenceMember, RoomSnapshotPayload, RoomState, RoomSocketMessage, Video } from '../types'
 import AppButton from '../components/ui/AppButton.vue'
 import AppCard from '../components/ui/AppCard.vue'
+import AppModal from '../components/ui/AppModal.vue'
+import AppInput from '../components/ui/AppInput.vue'
+import { useRoute } from 'vue-router'
 
 const props = defineProps<{
   room: Room & { is_owner?: boolean }
@@ -32,6 +35,7 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{ back: []; 'admin-rooms-changed': [] }>()
 const auth = useAuthStore()
+const route = useRoute()
 const state = ref<RoomState | null>(null)
 const playbackMode = ref<PlaybackMode>('sequential')
 const serverControlVersion = ref(0)
@@ -60,10 +64,18 @@ function showRoomActivity(text: string) {
 
 const currentVideo = ref(props.room.current_video_id || '')
 const manualUrl = ref('')
-const library = ref<Video[]>([])
+const manualUrlTitle = ref('')
+/** URL 队列条目的自定义展示名（仅前端；queue 提交仍为真实 URL id） */
+const queueDisplayTitles = ref<Map<string, string>>(new Map())
+const queueRenameDraft = ref('')
+const queueRenameTargetId = ref<string | null>(null)
+const queueRenameModalOpen = ref(false)
 const queue = ref<Video[]>([])
 const videoElement = ref<HTMLVideoElement | null>(null)
 let hls: Hls | null = null
+const scrubTime = ref(0)
+const scrubDragging = ref(false)
+const videoDuration = ref(0)
 const currentUser = computed(() => auth.user.value)
 
 const runtimeRoomPassword = ref(props.joinPassword ?? '')
@@ -109,6 +121,16 @@ watch(
 )
 
 watch(
+  () => route.query.password,
+  (q) => {
+    if (props.room.visibility !== 'private' || isRoomOwnerOrAdmin.value) return
+    const pwd = typeof q === 'string' ? q.trim() : ''
+    if (pwd) runtimeRoomPassword.value = pwd
+  },
+  { immediate: true },
+)
+
+watch(
   () => autoplayDeniedCount.value,
   (n) => {
     if (!canControl.value && n > 0) {
@@ -140,11 +162,99 @@ const connectionStatusLabel = computed(() => {
   return s
 })
 
-const selectedVideo = computed(
+const selectedVideo = computed(() => queue.value.find((item) => item.id === currentVideo.value))
+
+const shareModalOpen = ref(false)
+const shareCopyFeedback = ref('')
+
+const controlsVisible = ref(true)
+const volumePopoverOpen = ref(false)
+let controlsHideTimer: ReturnType<typeof setTimeout> | null = null
+const CONTROLS_HIDE_MS = 3200
+
+const showBigPlayOverlay = computed(
   () =>
-    queue.value.find((item) => item.id === currentVideo.value) ??
-    library.value.find((item) => item.id === currentVideo.value),
+    canControl.value &&
+    queue.value.length > 0 &&
+    (!currentVideo.value || !selectedVideo.value || !playbackUrl.value),
 )
+
+function displayTitleForQueueItem(item: Video): string {
+  const custom = queueDisplayTitles.value.get(item.id)?.trim()
+  if (custom) return clampDisplayTitle(custom)
+  return clampDisplayTitle(item.title)
+}
+
+function shareRoomLink(): string {
+  const origin = typeof window !== 'undefined' ? window.location.origin : ''
+  const base = `${origin}/room/${encodeURIComponent(props.room.id)}`
+  if (props.room.visibility !== 'private') return base
+  const pwd = runtimeRoomPassword.value.trim()
+  if (!pwd) return base
+  const q = new URLSearchParams({ password: pwd })
+  return `${base}?${q.toString()}`
+}
+
+async function copyShareLink() {
+  shareCopyFeedback.value = ''
+  const url = shareRoomLink()
+  try {
+    await navigator.clipboard.writeText(url)
+    shareCopyFeedback.value = '已复制到剪贴板'
+  } catch {
+    shareCopyFeedback.value = '复制失败，请手动全选复制'
+  }
+}
+
+function scheduleControlsHide() {
+  if (controlsHideTimer) {
+    clearTimeout(controlsHideTimer)
+    controlsHideTimer = null
+  }
+  if (!canControl.value && !volumePopoverOpen.value && state.value?.action === 'play' && !showBigPlayOverlay.value) {
+    controlsHideTimer = setTimeout(() => {
+      controlsHideTimer = null
+      controlsVisible.value = false
+    }, CONTROLS_HIDE_MS)
+  }
+}
+
+function showControlsBar() {
+  controlsVisible.value = true
+  scheduleControlsHide()
+}
+
+function onPlayerChromePointerMove() {
+  showControlsBar()
+}
+
+function onPlayerChromePointerLeave() {
+  scheduleControlsHide()
+}
+
+function onPlayerChromeTouchStart() {
+  showControlsBar()
+}
+
+function onVideoAreaFocusIn() {
+  showControlsBar()
+}
+
+watch([() => state.value?.action, volumePopoverOpen, showBigPlayOverlay], () => {
+  if (state.value?.action !== 'play' || volumePopoverOpen.value || showBigPlayOverlay.value) {
+    if (controlsHideTimer) {
+      clearTimeout(controlsHideTimer)
+      controlsHideTimer = null
+    }
+    controlsVisible.value = true
+    return
+  }
+  scheduleControlsHide()
+})
+
+watch(shareModalOpen, (open) => {
+  if (!open) shareCopyFeedback.value = ''
+})
 
 /** 与 Vercel 无本机文件场景对齐：优先外链 / `source_url`，其次 `/api/...` 相对路径 */
 function resolveVideoPlaybackUrl(video: Video): string {
@@ -193,9 +303,11 @@ function isSnapshotPayload(p: unknown): p is RoomSnapshotPayload {
 
 async function videoFromQueueId(id: string, token: string): Promise<Video | null> {
   if (isLikelyUrlQueueId(id)) {
+    const custom = queueDisplayTitles.value.get(id)?.trim()
+    const defaultTitle = shortTitleFromUrl(id)
     return {
       id,
-      title: id.split('/').pop() || id,
+      title: custom ? clampDisplayTitle(custom) : defaultTitle,
       file_path: id,
       file_url: id,
       duration: 0,
@@ -206,13 +318,8 @@ async function videoFromQueueId(id: string, token: string): Promise<Video | null
       updated_at: new Date().toISOString(),
     }
   }
-  const inLib = library.value.find((v) => v.id === id)
-  if (inLib) return inLib
   try {
     const v = await fetchVideo(token, id)
-    if (!library.value.some((x) => x.id === v.id)) {
-      library.value = [...library.value, v]
-    }
     return v
   } catch {
     return {
@@ -420,6 +527,10 @@ async function applyRoomSnapshot(payload: RoomSnapshotPayload) {
   const queueIds = topQueue.length ? topQueue : fromState
   if (queueIds.length) {
     queue.value = await buildQueueFromIds(queueIds, auth.accessToken.value)
+    const ids = new Set(queue.value.map((v) => v.id))
+    queueDisplayTitles.value = new Map(
+      [...queueDisplayTitles.value].filter(([k]) => ids.has(k)),
+    )
   } else if (!queueIds.length && payload.state?.video_id) {
     queue.value = await buildQueueFromIds([payload.state.video_id], auth.accessToken.value)
   }
@@ -436,21 +547,20 @@ async function applyRoomSnapshot(payload: RoomSnapshotPayload) {
 onMounted(async () => {
   roomLoadError.value = ''
   try {
-    const [snapshot, videos] = await Promise.all([
-      fetchRoomSnapshot(auth.accessToken.value, props.room.id, snapshotPassword()),
-      fetchVideos(auth.accessToken.value, { status: 'ready' }),
-    ])
-    library.value = videos.items
+    const snapshot = await fetchRoomSnapshot(auth.accessToken.value, props.room.id, snapshotPassword())
     await applyRoomSnapshot(snapshot)
     if (!ablyChannelName.value) {
       roomLoadError.value = '房间快照未返回 Ably 频道名，无法建立实时连接'
       return
     }
     connectRealtime()
+    showControlsBar()
   } catch (err) {
     if (err instanceof ApiError && err.status === 404) {
       roomLoadError.value = '房间已关闭或不存在'
       emit('admin-rooms-changed')
+    } else if (err instanceof ApiError && err.status === 403) {
+      roomLoadError.value = formatApiError(err, '无权进入：请检查分享链接中的密码，或返回大厅重新加入')
     } else {
       roomLoadError.value = formatApiError(err, '加载房间失败')
     }
@@ -469,6 +579,10 @@ onBeforeUnmount(() => {
   if (roomActivityClearTimer) {
     clearTimeout(roomActivityClearTimer)
     roomActivityClearTimer = null
+  }
+  if (controlsHideTimer) {
+    clearTimeout(controlsHideTimer)
+    controlsHideTimer = null
   }
   hls?.destroy()
   disconnectRealtime()
@@ -526,6 +640,36 @@ watch(rtLastMessage, (message) => {
 
 watch(playbackUrl, () => loadPlaybackSource())
 
+function onVideoLoadedMetadata() {
+  const v = videoElement.value
+  videoDuration.value = v && Number.isFinite(v.duration) && v.duration > 0 ? v.duration : 0
+  scrubTime.value = v?.currentTime ?? 0
+}
+
+function onVideoTimeUpdate() {
+  if (scrubDragging.value) return
+  const v = videoElement.value
+  if (v && Number.isFinite(v.currentTime)) scrubTime.value = v.currentTime
+}
+
+function onScrubPointerDown() {
+  scrubDragging.value = true
+}
+
+function onScrubPointerUp() {
+  scrubDragging.value = false
+  const v = videoElement.value
+  if (v && Number.isFinite(scrubTime.value)) v.currentTime = scrubTime.value
+}
+
+function onScrubInput(e: Event) {
+  const t = e.target as HTMLInputElement
+  const n = Number(t.value)
+  scrubTime.value = n
+  const v = videoElement.value
+  if (v && canControl.value) v.currentTime = n
+}
+
 function loadPlaybackSource() {
   const video = videoElement.value
   if (!video || !playbackUrl.value) return
@@ -548,6 +692,14 @@ function loadPlaybackSource() {
   }
   video.src = url
   video.load()
+  void video.addEventListener(
+    'loadedmetadata',
+    () => {
+      scrubTime.value = Number.isFinite(video.currentTime) ? video.currentTime : 0
+      videoDuration.value = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0
+    },
+    { once: true },
+  )
 }
 
 async function syncPlayerFromState(action: RoomSocketMessage['action'], nextPosition: number) {
@@ -556,6 +708,7 @@ async function syncPlayerFromState(action: RoomSocketMessage['action'], nextPosi
   await waitForVideoReady(video)
   if (Number.isFinite(nextPosition)) {
     video.currentTime = nextPosition
+    scrubTime.value = nextPosition
   }
   if (action === 'pause') {
     autoplayDeniedCount.value = 0
@@ -629,8 +782,18 @@ async function onSyncProgressClick() {
   }
 }
 
+async function onViewerPlayWhenWaitingOwner() {
+  viewerLocalPause.value = false
+  showRoomActivity('等待房主开始播放')
+}
+
 /** 观看者：先按服务端对齐进度，再本地播放（不调用房主控制 API） */
 async function onViewerPlayClick() {
+  const hasCurrent = Boolean(currentVideo.value && selectedVideo.value && playbackUrl.value)
+  if (!hasCurrent && queue.value.length > 0) {
+    await onViewerPlayWhenWaitingOwner()
+    return
+  }
   viewerLocalPause.value = false
   await resyncPlaybackFromServer()
   const v = videoElement.value
@@ -688,9 +851,13 @@ function onVideoEnded() {
 async function addManualUrl() {
   if (!canControl.value || !manualUrl.value.trim()) return
   const url = manualUrl.value.trim()
+  const display = manualUrlTitle.value.trim() || shortTitleFromUrl(url)
+  const nextTitles = new Map(queueDisplayTitles.value)
+  nextTitles.set(url, display)
+  queueDisplayTitles.value = nextTitles
   const stub: Video = {
     id: url,
-    title: url.split('/').pop() || url,
+    title: clampDisplayTitle(display),
     file_path: url,
     file_url: url,
     duration: 0,
@@ -704,21 +871,92 @@ async function addManualUrl() {
   const newIds = [...prev.map((v) => v.id), url]
   queue.value = [...prev, stub]
   manualUrl.value = ''
+  manualUrlTitle.value = ''
   pendingQueueSubmit.value++
   const ok = await submitOwnerControl({ action: 'pause', position: getVideoTime(), queue: newIds })
-  if (!ok) queue.value = prev
+  if (!ok) {
+    queue.value = prev
+    const rollback = new Map(queueDisplayTitles.value)
+    rollback.delete(url)
+    queueDisplayTitles.value = rollback
+  }
   pendingQueueSubmit.value--
 }
 
-async function addLibraryVideo(video: Video) {
-  if (!canControl.value || queue.value.some((item) => item.id === video.id)) return
-  const prev = [...queue.value]
-  const newIds = [...prev.map((v) => v.id), video.id]
-  queue.value = [...prev, video]
-  pendingQueueSubmit.value++
-  const ok = await submitOwnerControl({ action: 'pause', position: getVideoTime(), queue: newIds })
-  if (!ok) queue.value = prev
-  pendingQueueSubmit.value--
+function firstQueueVideoId(): string | null {
+  return queue.value[0]?.id ?? null
+}
+
+async function ownerStartQueuePlayback() {
+  const firstId = firstQueueVideoId()
+  if (!firstId || !canControl.value) return
+  const prev = currentVideo.value
+  currentVideo.value = firstId
+  const ok = await submitOwnerControl({
+    action: 'play',
+    position: 0,
+    video_id: firstId,
+    queue: queue.value.map((v) => v.id),
+  })
+  if (!ok) currentVideo.value = prev
+}
+
+async function onOwnerBarPlayClick() {
+  if (!canControl.value) return
+  const hasCurrent = Boolean(currentVideo.value && selectedVideo.value && playbackUrl.value)
+  if (!hasCurrent && queue.value.length > 0) {
+    await ownerStartQueuePlayback()
+    return
+  }
+  onOwnerPlay()
+}
+
+function openQueueRename(item: Video) {
+  if (!canControl.value) return
+  queueRenameTargetId.value = item.id
+  queueRenameDraft.value = queueDisplayTitles.value.get(item.id)?.trim() ?? displayTitleForQueueItem(item)
+  queueRenameModalOpen.value = true
+}
+
+function closeQueueRename() {
+  queueRenameModalOpen.value = false
+  queueRenameTargetId.value = null
+  queueRenameDraft.value = ''
+}
+
+function applyQueueRename() {
+  if (!canControl.value || !queueRenameTargetId.value) return
+  const id = queueRenameTargetId.value
+  const raw = queueRenameDraft.value.trim()
+  const nextMap = new Map(queueDisplayTitles.value)
+  if (!raw || raw === shortTitleFromUrl(id)) {
+    nextMap.delete(id)
+  } else {
+    nextMap.set(id, clampDisplayTitle(raw))
+  }
+  queueDisplayTitles.value = nextMap
+  queue.value = queue.value.map((v) => {
+    if (v.id !== id) return v
+    const t = displayTitleForQueueItem(v)
+    return { ...v, title: t }
+  })
+  closeQueueRename()
+}
+
+function onEnterPictureInPicture(ev: Event) {
+  const v = ev.target as HTMLVideoElement & { exitPictureInPicture?: () => Promise<void> }
+  try {
+    void v.exitPictureInPicture?.()
+  } catch {
+    // ignore
+  }
+  showRoomActivity('当前房间不支持小窗播放，已退出画中画。')
+}
+
+function onVideoWrapperClick(ev: MouseEvent) {
+  const t = ev.target as HTMLElement
+  if (t.closest('.player-chrome') || t.closest('.autoplay-blocked-overlay') || t.closest('.big-play-overlay')) return
+  if (canControl.value) showControlsBar()
 }
 
 async function moveQueue(index: number, delta: number) {
@@ -741,9 +979,15 @@ async function removeQueue(index: number) {
   if (!canControl.value) return
   const prev = [...queue.value]
   const items = [...queue.value]
+  const removedId = items[index]?.id
   items.splice(index, 1)
   const newIds = items.map((v) => v.id)
   queue.value = items
+  if (removedId) {
+    const nextMap = new Map(queueDisplayTitles.value)
+    nextMap.delete(removedId)
+    queueDisplayTitles.value = nextMap
+  }
   pendingQueueSubmit.value++
   const ok = await submitOwnerControl({ action: 'pause', position: getVideoTime(), queue: newIds })
   if (!ok) queue.value = prev
@@ -834,6 +1078,10 @@ function setViewerVolume(e: Event) {
   <section v-else class="room-layout">
     <div class="room-main">
       <AppCard padding="compact">
+        <div class="room-title-row">
+          <h2 class="room-title">{{ room.name }}</h2>
+          <AppButton size="sm" variant="secondary" type="button" @click="shareModalOpen = true">分享房间</AppButton>
+        </div>
         <AppButton variant="ghost" size="sm" @click="emit('back')">← 返回大厅</AppButton>
 
         <div class="realtime-bar muted" style="margin-top: 0.5rem; display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center">
@@ -857,15 +1105,37 @@ function setViewerVolume(e: Event) {
         </p>
         <p v-if="roomActivityMessage" class="room-activity-toast" role="status">{{ roomActivityMessage }}</p>
 
-        <div class="video-frame video-frame--stacked">
-          <div class="video-frame__stack">
+        <div
+          class="video-frame video-frame--stacked"
+          @pointermove="onPlayerChromePointerMove"
+          @pointerleave="onPlayerChromePointerLeave"
+          @touchstart.passive="onPlayerChromeTouchStart"
+          @focusin.capture="onVideoAreaFocusIn"
+          @click="onVideoWrapperClick"
+        >
+          <div class="video-frame__stack player-stack">
             <video
               ref="videoElement"
-              :controls="canControl"
+              class="room-video"
+              :controls="false"
               playsinline
+              disablePictureInPicture
+              disableRemotePlayback
+              controlsList="nodownload noplaybackrate noremoteplayback"
+              @loadedmetadata="onVideoLoadedMetadata"
+              @timeupdate="onVideoTimeUpdate"
+              @enterpictureinpicture="onEnterPictureInPicture"
               v-on="ownerVideoListeners"
               @ended="onVideoEnded"
             />
+            <div
+              v-if="showBigPlayOverlay"
+              class="big-play-overlay"
+              role="region"
+              aria-label="开始播放队列"
+            >
+              <AppButton variant="primary" type="button" @click.stop="ownerStartQueuePlayback">播放队列</AppButton>
+            </div>
             <div
               v-if="!canControl && showAutoplayBlockedOverlay"
               class="autoplay-blocked-overlay"
@@ -876,36 +1146,61 @@ function setViewerVolume(e: Event) {
               <p v-if="autoplayOverlayHint" class="autoplay-blocked-overlay__hint muted">{{ autoplayOverlayHint }}</p>
               <AppButton variant="primary" type="button" @click="onSyncProgressClick">同步进度</AppButton>
             </div>
-          </div>
-          <div v-if="!canControl" class="viewer-chrome">
-            <p class="viewer-chrome__hint">
-              观看模式：进度与切视频由房主同步。控制栏仅含播放/暂停与音量；点击「播放」会先向服务端同步进度。暂停与音量仅作用于本机。
-            </p>
-            <div class="viewer-chrome__row viewer-chrome__row--controls">
-              <AppButton size="sm" variant="primary" type="button" @click="onViewerPlayClick">播放</AppButton>
-              <AppButton size="sm" variant="secondary" type="button" @click="onViewerPauseClick">暂停</AppButton>
-              <label class="viewer-chrome__label">
-                音量
-                <input
-                  class="ui-input"
-                  type="range"
-                  min="0"
-                  max="1"
-                  step="0.05"
-                  :value="videoElement?.volume ?? 1"
-                  @input="setViewerVolume"
-                />
-              </label>
-              <AppButton size="sm" variant="secondary" type="button" @click="toggleViewerMute">
-                {{ videoElement?.muted ? '取消静音' : '静音' }}
-              </AppButton>
+            <div
+              class="player-chrome"
+              :class="{ 'player-chrome--hidden': !controlsVisible && !showBigPlayOverlay }"
+              @pointermove.stop="showControlsBar"
+            >
+              <div v-if="canControl" class="owner-chrome__row">
+                <AppButton size="sm" variant="primary" type="button" @click.stop="onOwnerBarPlayClick">播放</AppButton>
+                <AppButton size="sm" variant="secondary" type="button" @click.stop="onOwnerPause">暂停</AppButton>
+                <label class="owner-chrome__scrub">
+                  <span class="sr-only">进度</span>
+                  <input
+                    class="ui-input owner-chrome__range"
+                    type="range"
+                    :min="0"
+                    :max="Math.max(0.01, videoDuration || selectedVideo?.duration || 600)"
+                    step="0.25"
+                    :value="scrubTime"
+                    @pointerdown.stop="onScrubPointerDown"
+                    @pointerup.stop="onScrubPointerUp"
+                    @input.stop="onScrubInput"
+                  />
+                </label>
+              </div>
+              <div v-if="!canControl" class="viewer-chrome__row viewer-chrome__row--controls">
+                <AppButton size="sm" variant="primary" type="button" @click.stop="onViewerPlayClick">播放</AppButton>
+                <AppButton size="sm" variant="secondary" type="button" @click.stop="onViewerPauseClick">暂停</AppButton>
+              </div>
+              <div class="player-chrome__volume-row">
+                <label class="viewer-chrome__label" @pointerdown.stop @click.stop>
+                  音量
+                  <input
+                    class="ui-input"
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.05"
+                    :value="videoElement?.volume ?? 1"
+                    @focus="volumePopoverOpen = true"
+                    @blur="volumePopoverOpen = false"
+                    @input="setViewerVolume"
+                  />
+                </label>
+                <AppButton size="sm" variant="secondary" type="button" @click.stop="toggleViewerMute">
+                  {{ videoElement?.muted ? '取消静音' : '静音' }}
+                </AppButton>
+              </div>
             </div>
           </div>
         </div>
         <p class="muted">当前视频：{{ selectedVideo?.title || currentVideo || '尚未选择视频' }}</p>
         <p v-if="controlError" class="error" role="alert">{{ controlError }}</p>
-        <p v-if="!canControl" class="hint">普通成员为只读观看；进度与切视频由房主通过播放器与队列控制。</p>
-        <p v-else class="hint">房主请使用播放器自带控件进行播放、暂停与拖动进度；队列变更会立即提交到服务端。</p>
+        <p v-if="!canControl" class="hint">
+          进度与切视频由房主控制；你可正常观看并与房间同步。播放/暂停可先对齐服务端进度；音量与静音仅作用于本机。
+        </p>
+        <p v-else class="hint">房主可使用下方控制条与进度条；队列变更会立即提交到服务端。</p>
       </AppCard>
 
       <div class="room-sidebar-toggle">
@@ -933,41 +1228,45 @@ function setViewerVolume(e: Event) {
           </label>
           <AppButton v-if="canControl" size="sm" variant="secondary" type="button" @click="ownerNextTrack">下一首</AppButton>
         </div>
-        <form class="inline-form" @submit.prevent="addManualUrl">
+        <form class="inline-form inline-form--stack" @submit.prevent="addManualUrl">
           <input v-model="manualUrl" class="ui-input" placeholder="添加 mp4 / m3u8 URL" :disabled="!canControl" />
+          <input
+            v-model="manualUrlTitle"
+            class="ui-input"
+            placeholder="显示名称（可选）"
+            :disabled="!canControl"
+          />
           <AppButton type="submit" size="sm" :disabled="!canControl">添加</AppButton>
         </form>
+        <p v-if="!canControl" class="muted queue-owner-hint">队列由房主管理；你可查看顺序与当前条目。</p>
         <div class="queue-item" v-for="(item, index) in queue" :key="item.id">
-          <div>
-            <strong>{{ item.title }}</strong>
-            <small>{{ item.file_url || item.file_path }}</small>
+          <div class="queue-item__text">
+            <strong :title="item.file_url || item.file_path || item.id">{{ displayTitleForQueueItem(item) }}</strong>
+            <small class="queue-url-line" :title="item.file_url || item.file_path">{{ item.file_url || item.file_path }}</small>
           </div>
           <div class="queue-actions">
-            <AppButton size="sm" variant="secondary" :disabled="!canControl || index === 0" @click="moveQueue(index, -1)">
+            <AppButton
+              v-if="canControl"
+              size="sm"
+              variant="secondary"
+              :disabled="index === 0"
+              @click="moveQueue(index, -1)"
+            >
               上移
             </AppButton>
             <AppButton
+              v-if="canControl"
               size="sm"
               variant="secondary"
-              :disabled="!canControl || index === queue.length - 1"
+              :disabled="index === queue.length - 1"
               @click="moveQueue(index, 1)"
             >
               下移
             </AppButton>
-            <AppButton size="sm" :disabled="!canControl" @click="switchToQueueItem(item)">切换</AppButton>
-            <AppButton size="sm" variant="danger" :disabled="!canControl" @click="removeQueue(index)">删除</AppButton>
+            <AppButton v-if="canControl" size="sm" :disabled="!canControl" @click="switchToQueueItem(item)">切换</AppButton>
+            <AppButton v-if="canControl" size="sm" variant="secondary" @click="openQueueRename(item)">改名</AppButton>
+            <AppButton v-if="canControl" size="sm" variant="danger" :disabled="!canControl" @click="removeQueue(index)">删除</AppButton>
           </div>
-        </div>
-      </AppCard>
-
-      <AppCard padding="compact">
-        <h3 class="sidebar-heading">视频库</h3>
-        <div class="queue-item" v-for="video in library" :key="video.id">
-          <div>
-            <strong>{{ video.title }}</strong>
-            <small>{{ Math.round(video.duration || 0) }} 秒 · {{ video.format || 'unknown' }}</small>
-          </div>
-          <AppButton size="sm" variant="secondary" :disabled="!canControl" @click="addLibraryVideo(video)">加入队列</AppButton>
         </div>
       </AppCard>
 
@@ -998,10 +1297,160 @@ function setViewerVolume(e: Event) {
         <pre class="events-pre">{{ eventPreview || '—' }}</pre>
       </AppCard>
     </aside>
+
+    <AppModal v-model="shareModalOpen" title="分享房间">
+      <p class="muted" style="margin-top: 0">
+        复制下方链接即可邀请他人进入同一房间。私有房链接可能包含密码参数，请勿公开发布。
+      </p>
+      <textarea class="share-url-field" readonly rows="3" :value="shareRoomLink()" />
+      <p v-if="shareCopyFeedback" class="muted" role="status">{{ shareCopyFeedback }}</p>
+      <template #footer>
+        <AppButton variant="secondary" type="button" @click="shareModalOpen = false">关闭</AppButton>
+        <AppButton variant="primary" type="button" @click="copyShareLink">复制链接</AppButton>
+      </template>
+    </AppModal>
+
+    <AppModal v-model="queueRenameModalOpen" title="编辑显示名称" @close="closeQueueRename">
+      <AppInput v-model="queueRenameDraft" label="显示名称" hint="留空或恢复默认则使用短链接标题" />
+      <template #footer>
+        <AppButton variant="secondary" type="button" @click="closeQueueRename">取消</AppButton>
+        <AppButton variant="primary" type="button" @click="applyQueueRename">保存</AppButton>
+      </template>
+    </AppModal>
   </section>
 </template>
 
 <style scoped>
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+.room-title-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+.room-title {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 600;
+}
+.player-stack {
+  background: #0f172a;
+  border-radius: 0.5rem;
+  overflow: hidden;
+}
+.room-video {
+  display: block;
+  width: 100%;
+  max-height: min(70vh, 520px);
+  vertical-align: middle;
+}
+.big-play-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(2, 6, 23, 0.45);
+  z-index: 3;
+  pointer-events: auto;
+}
+.player-chrome {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 0.5rem 0.75rem 0.65rem;
+  background: linear-gradient(transparent, rgba(2, 6, 23, 0.85));
+  color: #f8fafc;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  z-index: 4;
+  transition: opacity 0.25s ease, transform 0.25s ease;
+  pointer-events: none;
+}
+.player-chrome > * {
+  pointer-events: auto;
+}
+.player-chrome--hidden {
+  opacity: 0;
+  transform: translateY(6px);
+  pointer-events: none;
+}
+.player-chrome--hidden > * {
+  pointer-events: none;
+}
+.owner-chrome__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+.owner-chrome__scrub {
+  flex: 1 1 8rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  font-size: 0.75rem;
+  margin: 0;
+}
+.owner-chrome__range {
+  width: 100%;
+  min-height: 2rem;
+}
+.player-chrome__volume-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.5rem;
+}
+.player-chrome .viewer-chrome__label {
+  color: #e2e8f0;
+  font-size: 0.8125rem;
+}
+.share-url-field {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: ui-monospace, monospace;
+  font-size: 0.8125rem;
+  padding: 0.5rem;
+  border-radius: 0.375rem;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  resize: vertical;
+}
+.inline-form--stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  align-items: stretch;
+}
+.queue-owner-hint {
+  margin: 0 0 0.5rem;
+  font-size: 0.8125rem;
+}
+.queue-item__text {
+  min-width: 0;
+  flex: 1;
+}
+.queue-url-line {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
 .channel-hint {
   max-width: 14rem;
   overflow: hidden;
