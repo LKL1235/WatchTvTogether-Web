@@ -7,6 +7,7 @@ import LobbyView from './views/LobbyView.vue'
 import RoomView from './views/RoomView.vue'
 import AdminView from './views/AdminView.vue'
 import type { Room } from './types'
+import { displayNameForUser } from './utils/userDisplay'
 
 const auth = useAuthStore()
 const currentRoom = ref<Room | null>(null)
@@ -75,7 +76,7 @@ onMounted(() => {
         <AppButton v-if="isAdmin" :variant="showAdmin ? 'primary' : 'secondary'" size="sm" @click="goAdmin">
           管理员后台
         </AppButton>
-        <AppButton variant="ghost" size="sm" @click="auth.logout()">退出 {{ auth.user.value?.username }}</AppButton>
+        <AppButton variant="ghost" size="sm" @click="auth.logout()">退出 {{ displayNameForUser(auth.user.value) }}</AppButton>
       </nav>
     </header>
 

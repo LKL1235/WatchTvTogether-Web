@@ -1,7 +1,8 @@
 import * as Ably from 'ably'
 import { onBeforeUnmount, ref, shallowRef } from 'vue'
 
-import { fetchAblyToken } from '../api'
+import { ApiError, fetchAblyToken } from '../api'
+import { useAuthStore } from '../stores/auth'
 import type { RoomPresenceMember, RoomSnapshotPayload, RoomSocketMessage, User } from '../types'
 
 function normalizeAblyMessage(name: string, data: unknown): RoomSocketMessage | null {
@@ -34,6 +35,7 @@ export function useRoomRealtime(options: {
   /** 房主或站点管理员：presence 与 token 均无需房间密码 */
   isOwnerOrAdmin?: () => boolean
 }) {
+  const authStore = useAuthStore()
   const connected = ref(false)
   const connecting = ref(false)
   const connectionState = ref<string>('initialized')
@@ -49,14 +51,20 @@ export function useRoomRealtime(options: {
     const data = presence.data
     const parsed =
       typeof data === 'string'
-        ? (JSON.parse(data) as { username?: string; role?: string; is_owner?: boolean })
-        : (data as { username?: string; role?: string; is_owner?: boolean }) ?? {}
+        ? (JSON.parse(data) as {
+            username?: string
+            nickname?: string
+            role?: string
+            is_owner?: boolean
+          })
+        : (data as { username?: string; nickname?: string; role?: string; is_owner?: boolean }) ?? {}
     const username = parsed.username ?? presence.clientId ?? 'unknown'
     const id = presence.clientId ?? ''
     const connId = presence.connectionId ?? ''
     const entry: RoomPresenceMember = {
       id,
       username,
+      nickname: parsed.nickname,
       role: parsed.role,
       is_owner: parsed.is_owner,
       connectionId: presence.connectionId,
@@ -103,6 +111,7 @@ export function useRoomRealtime(options: {
     next.presence
       .enter({
         username: options.currentUser()?.username ?? 'guest',
+        nickname: options.currentUser()?.nickname,
         role: options.currentUser()?.role ?? 'user',
         is_owner: Boolean(options.isOwnerOrAdmin?.()),
       })
@@ -150,23 +159,51 @@ export function useRoomRealtime(options: {
     connectionState.value = 'connecting'
 
     const rt = new Ably.Realtime({
-      authCallback: (tokenParams, callback) => {
-        const jwt = options.accessToken()
+      authCallback: (_tokenParams, callback) => {
         const roomId = options.roomId()
         const pwd = options.roomPassword?.()
-        void fetchAblyToken(jwt, {
+        const body = {
           room_id: roomId,
-          purpose: 'room',
+          purpose: 'room' as const,
           ...(pwd ? { password: pwd } : {}),
-        })
-          .then((details) => {
-            callback(null, details.token)
+        }
+
+        const run = (access: string) =>
+          fetchAblyToken(access, body).then((res) => {
+            void res.expires_at
+            return res.token
           })
-          .catch((e: unknown) => {
+
+        void (async () => {
+          try {
+            const token = await run(options.accessToken())
+            callback(null, token)
+          } catch (e: unknown) {
+            if (e instanceof ApiError && e.status === 401) {
+              try {
+                await authStore.refreshSession()
+                const token = await run(options.accessToken())
+                callback(null, token)
+                return
+              } catch (e2: unknown) {
+                const msg2 = e2 instanceof Error ? e2.message : String(e2)
+                error.value = msg2
+                callback(msg2, null)
+                return
+              }
+            }
+            if (e instanceof ApiError && e.status === 403) {
+              const msg =
+                '房间鉴权失败：请确认私有房密码或重新加入房间。若问题持续，请返回大厅后重试。'
+              error.value = msg
+              callback(msg, null)
+              return
+            }
             const msg = e instanceof Error ? e.message : String(e)
             error.value = msg
             callback(msg, null)
-          })
+          }
+        })()
       },
     })
 

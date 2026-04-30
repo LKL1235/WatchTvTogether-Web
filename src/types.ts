@@ -1,9 +1,24 @@
 export interface User {
   id: string
   username: string
+  /** 账户邮箱；不在房间成员等公开 UI 中默认展示 */
+  email?: string
   nickname?: string
   avatar_url?: string
   role: 'admin' | 'user'
+}
+
+/** POST /api/auth/register/code 与找回密码发码成功响应 */
+export interface RegisterCodeResponse {
+  expires_at: string
+  retry_after: number
+  retry_after_s?: number
+}
+
+/** POST /api/ably/token：后端签发的 Ably 用 JWT */
+export interface AblyJwtResponse {
+  token: string
+  expires_at: string
 }
 
 export interface AuthTokens {
@@ -80,6 +95,7 @@ export interface RoomSocketMessage {
   user?: {
     id: string
     username: string
+    nickname?: string
     role: string
     is_owner: boolean
   }
@@ -88,18 +104,12 @@ export interface RoomSocketMessage {
 /** Ably 频道消息的通用结构（name 如 room.sync，data 为 JSON） */
 export type RoomRealtimeMessage = RoomSocketMessage
 
-export interface AblyTokenDetails {
-  token: string
-  expires: number
-  issued: number
-  capability: string
-  clientId: string
-}
-
 export interface RoomPresenceMember {
   /** 后端 JWT 用户 ID，与 Ably clientId 一致 */
   id: string
   username: string
+  /** 展示名，可与他人重复；UI 优先展示 */
+  nickname?: string
   role?: string
   is_owner?: boolean
   connectionId?: string
@@ -110,7 +120,7 @@ export interface RoomSnapshotPayload {
   room_id: string
   state?: RoomState
   /** 后端快照不再包含实时在线用户；Ably presence 维护成员列表 */
-  users?: Array<{ id: string; username: string; role: string; is_owner: boolean }>
+  users?: Array<{ id: string; username: string; nickname?: string; role: string; is_owner: boolean }>
   /** 服务端可能返回 null；前端须归一化为数组 */
   queue?: string[] | null
   viewer_count: number
