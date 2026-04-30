@@ -1446,7 +1446,7 @@ function setViewerVolume(e: Event) {
   right: 0;
   bottom: 0;
   padding: 1.65rem 0.75rem 0.65rem;
-  background: linear-gradient(180deg, transparent 0%, rgba(0, 0, 0, 0.58) 42%, rgba(0, 0, 0, 0.74) 100%);
+  background: linear-gradient(180deg, transparent 0%, rgba(0, 0, 0, 0.28) 42%, rgba(0, 0, 0, 0.46) 100%);
   color: #f8fafc;
   display: flex;
   flex-direction: column;
