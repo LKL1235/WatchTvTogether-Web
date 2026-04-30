@@ -35,6 +35,9 @@ const auth = useAuthStore()
 const state = ref<RoomState | null>(null)
 const playbackMode = ref<PlaybackMode>('sequential')
 const serverControlVersion = ref(0)
+/** 串行化房主控制 HTTP，避免并发请求共用旧 control_version 导致 409 stale */
+let ownerControlLock: Promise<void> = Promise.resolve()
+let ownerSeekSubmitTimer: ReturnType<typeof setTimeout> | null = null
 /** 正在应用远端同步（Ably / HTTP 响应），避免触发房主控制回环 */
 const applyingRemoteSync = ref(false)
 let remoteSyncClearTimer: ReturnType<typeof setTimeout> | null = null
@@ -240,7 +243,7 @@ function mergePlaybackFieldsFromRoomState(s: RoomState) {
     playbackMode.value = s.playback_mode
   }
   if (typeof s.control_version === 'number' && s.control_version > 0) {
-    serverControlVersion.value = s.control_version
+    serverControlVersion.value = Math.max(serverControlVersion.value, s.control_version)
   }
 }
 
@@ -292,6 +295,29 @@ async function submitOwnerControl(input: {
   playback_mode?: PlaybackMode
 }): Promise<boolean> {
   if (!canControl.value) return false
+  const previous = ownerControlLock
+  let release!: () => void
+  ownerControlLock = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  await previous
+  try {
+    return await performOwnerControl(input, false)
+  } finally {
+    release()
+  }
+}
+
+async function performOwnerControl(
+  input: {
+    action: RoomSocketMessage['action']
+    position: number
+    video_id?: string
+    queue?: string[]
+    playback_mode?: PlaybackMode
+  },
+  afterStaleRetry: boolean,
+): Promise<boolean> {
   controlError.value = ''
   const queueIds = input.queue ?? queue.value.map((v) => v.id)
   const body = {
@@ -310,6 +336,23 @@ async function submitOwnerControl(input: {
     await refreshAuthoritativeState()
     return true
   } catch (err) {
+    const staleConflict =
+      err instanceof ApiError &&
+      err.status === 409 &&
+      /stale control version/i.test(String(err.message))
+    if (staleConflict && !afterStaleRetry) {
+      try {
+        const snap = await fetchRoomSnapshot(auth.accessToken.value, props.room.id, snapshotPassword())
+        await applyRoomSnapshot(snap)
+      } catch {
+        try {
+          await refreshAuthoritativeState()
+        } catch {
+          // ignore
+        }
+      }
+      return performOwnerControl(input, true)
+    }
     controlError.value = formatApiError(err, '同步失败')
     try {
       const snap = await fetchRoomSnapshot(auth.accessToken.value, props.room.id, snapshotPassword())
@@ -415,6 +458,10 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  if (ownerSeekSubmitTimer) {
+    clearTimeout(ownerSeekSubmitTimer)
+    ownerSeekSubmitTimer = null
+  }
   if (remoteSyncClearTimer) {
     clearTimeout(remoteSyncClearTimer)
     remoteSyncClearTimer = null
@@ -617,7 +664,11 @@ function onOwnerPause() {
 
 function onOwnerSeeked() {
   if (!canControl.value || applyingRemoteSync.value) return
-  void submitOwnerControl({ action: 'seek', position: getVideoTime() })
+  if (ownerSeekSubmitTimer) clearTimeout(ownerSeekSubmitTimer)
+  ownerSeekSubmitTimer = setTimeout(() => {
+    ownerSeekSubmitTimer = null
+    void submitOwnerControl({ action: 'seek', position: getVideoTime() })
+  }, 220)
 }
 
 function onVideoEnded() {
