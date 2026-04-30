@@ -7,6 +7,11 @@ import {
 } from '../api'
 import { useAuthStore } from '../stores/auth'
 import { formatApiError } from '../utils/errors'
+import {
+  getPasswordPolicyMessage,
+  PASSWORD_RULES_SHORT,
+  PASSWORD_RULES_TOOLTIP,
+} from '../utils/passwordPolicy'
 import AppButton from '../components/ui/AppButton.vue'
 import AppCard from '../components/ui/AppCard.vue'
 import AppInput from '../components/ui/AppInput.vue'
@@ -106,7 +111,10 @@ function validateRegisterForm(): boolean {
   if (!em || !emailRe.test(em)) fieldErrors.value.email = '请输入有效邮箱'
   const u = normalizeUsername(regUsername.value)
   if (!usernameRe.test(u)) fieldErrors.value.reg_username = '用户名 3–40 位，仅小写字母、数字、下划线'
-  if (regPassword.value.length < 8) fieldErrors.value.reg_password = '密码至少 8 位'
+  {
+    const msg = getPasswordPolicyMessage(regPassword.value)
+    if (msg) fieldErrors.value.reg_password = msg
+  }
   if (!codeRe.test(regCode.value.trim())) fieldErrors.value.code = '请输入 6 位数字验证码'
   const nick = regNickname.value.trim()
   if (nick && nick.length < 2) fieldErrors.value.nickname = '显示名至少 2 个字符，或留空（将默认使用用户名）'
@@ -123,7 +131,13 @@ function validateResetStep1(): boolean {
 function validateResetStep2(): boolean {
   fieldErrors.value = {}
   if (!codeRe.test(resetCode.value.trim())) fieldErrors.value.reset_code = '请输入 6 位数字验证码'
-  if (resetNewPassword.value.length < 8) fieldErrors.value.reset_new_password = '新密码至少 8 位'
+  {
+    const msg = getPasswordPolicyMessage(resetNewPassword.value)
+    if (msg) {
+      fieldErrors.value.reset_new_password =
+        msg === '密码至少 8 位' ? '新密码至少 8 位' : msg.replace(/^密码/, '新密码')
+    }
+  }
   return Object.keys(fieldErrors.value).length === 0
 }
 
@@ -329,7 +343,8 @@ const cardTitle = computed(() => {
             label="新密码"
             type="password"
             :error="resetPwdError"
-            hint="至少 8 位"
+            :hint="PASSWORD_RULES_SHORT"
+            :hint-tooltip="PASSWORD_RULES_TOOLTIP"
             autocomplete="new-password"
             :minlength="8"
             placeholder="••••••••"
@@ -382,6 +397,7 @@ const cardTitle = computed(() => {
             type="password"
             :error="loginPwdError"
             hint="至少 8 位"
+            :hint-tooltip="PASSWORD_RULES_TOOLTIP"
             autocomplete="current-password"
             required
             :minlength="8"
@@ -457,7 +473,8 @@ const cardTitle = computed(() => {
             label="密码"
             type="password"
             :error="regPwdError"
-            hint="至少 8 位"
+            :hint="PASSWORD_RULES_SHORT"
+            :hint-tooltip="PASSWORD_RULES_TOOLTIP"
             autocomplete="new-password"
             required
             :minlength="8"
