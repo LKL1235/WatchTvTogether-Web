@@ -112,6 +112,9 @@ async function confirmJoin() {
     closeJoinModal()
     emit('open-room', joined, joinPassword.value.trim() || undefined, joined.left_room_id)
   } catch (err) {
+    if (err instanceof ApiError && err.status === 403) {
+      joinModalReason.value = 'need_password_again'
+    }
     joinError.value = formatApiError(err, '加入失败，请检查密码或稍后重试')
   } finally {
     joinLoading.value = false
