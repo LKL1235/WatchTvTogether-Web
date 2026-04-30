@@ -1,18 +1,18 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { createDownload, deleteVideo, fetchDownloads, fetchRooms, fetchVideos } from '../api'
+import { closeRoom, createDownload, deleteVideo, fetchAdminRooms, fetchDownloads, fetchVideos } from '../api'
 import { useAuthStore } from '../stores/auth'
 import { formatApiError } from '../utils/errors'
-import type { DownloadTask, Room, Video } from '../types'
+import type { AdminRoomRow, DownloadTask, Video } from '../types'
 import AppButton from '../components/ui/AppButton.vue'
 import AppCard from '../components/ui/AppCard.vue'
 import AppEmpty from '../components/ui/AppEmpty.vue'
 
-const emit = defineEmits<{ 'open-room': [room: Room] }>()
+const emit = defineEmits<{ 'open-room': [room: AdminRoomRow] }>()
 const auth = useAuthStore()
 const videos = ref<Video[]>([])
 const downloads = ref<DownloadTask[]>([])
-const rooms = ref<Room[]>([])
+const rooms = ref<AdminRoomRow[]>([])
 const sourceUrl = ref('')
 const message = ref('')
 const loadError = ref('')
@@ -31,7 +31,7 @@ async function loadAll() {
     const [videoRes, downloadRes, roomRes] = await Promise.all([
       fetchVideos(auth.accessToken.value),
       fetchDownloads(auth.accessToken.value),
-      fetchRooms(auth.accessToken.value),
+      fetchAdminRooms(auth.accessToken.value),
     ])
     videos.value = videoRes.items
     downloads.value = downloadRes.items
@@ -84,6 +84,33 @@ function startDownloadPolling() {
       // 静默失败，避免后台页刷屏；用户可点「刷新」
     }
   }, 4000)
+}
+
+async function adminCloseRoom(room: AdminRoomRow) {
+  if (!window.confirm(`确定关闭并删除房间「${room.name}」？房间内所有用户将被断开。`)) return
+  message.value = ''
+  loadError.value = ''
+  try {
+    await closeRoom(auth.accessToken.value, room.id)
+    rooms.value = rooms.value.filter((r) => r.id !== room.id)
+    message.value = '房间已关闭'
+  } catch (err) {
+    window.alert(formatApiError(err, '关闭房间失败'))
+  }
+}
+
+function roomPlaybackLabel(room: AdminRoomRow) {
+  const a = room.playback_action ?? room.action
+  if (a === 'play') return '播放中'
+  if (a === 'pause') return '已暂停'
+  if (a) return String(a)
+  return '—'
+}
+
+function roomOnlineCount(room: AdminRoomRow) {
+  if (typeof room.online_count === 'number') return room.online_count
+  if (typeof room.viewer_count === 'number') return room.viewer_count
+  return '—'
 }
 
 function stopDownloadPolling() {
@@ -185,11 +212,15 @@ onUnmounted(() => {
         <div class="table-row" v-for="room in rooms" :key="room.id">
           <div>
             <strong>{{ room.name }}</strong>
-            <small class="muted">{{ room.visibility }} · owner {{ room.owner_id }}</small>
+            <small class="muted">
+              {{ room.visibility }} · 房主 {{ room.owner_id }} · 在线 {{ roomOnlineCount(room) }} ·
+              {{ roomPlaybackLabel(room) }}
+            </small>
           </div>
           <div style="display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap">
             <span class="pill">{{ room.current_video_id || '未选择视频' }}</span>
             <AppButton size="sm" variant="secondary" @click="emit('open-room', room)">进入房间</AppButton>
+            <AppButton size="sm" variant="danger" @click="adminCloseRoom(room)">关闭房间</AppButton>
           </div>
         </div>
       </div>

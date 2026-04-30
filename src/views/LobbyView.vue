@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { nextTick, onMounted, ref } from 'vue'
-import { createRoom as createRoomRequest, fetchRooms, joinRoom } from '../api'
+import { computed, inject, nextTick, onMounted, ref, watch, type Ref } from 'vue'
+import { ApiError, createRoom as createRoomRequest, fetchRooms, joinRoom } from '../api'
 import { useAuthStore } from '../stores/auth'
 import { formatApiError } from '../utils/errors'
 import type { Room } from '../types'
@@ -11,8 +11,12 @@ import AppInput from '../components/ui/AppInput.vue'
 import AppModal from '../components/ui/AppModal.vue'
 import AppSelect from '../components/ui/AppSelect.vue'
 
-const emit = defineEmits<{ 'open-room': [room: Room, joinPassword?: string] }>()
+const emit = defineEmits<{
+  'open-room': [room: Room, joinPassword?: string, leftRoomId?: string]
+}>()
 const auth = useAuthStore()
+const lobbyListTick = inject<Ref<number>>('lobbyListTick', ref(0))
+
 const rooms = ref<Room[]>([])
 const loading = ref(false)
 const error = ref('')
@@ -25,6 +29,8 @@ const pendingRoom = ref<Room | null>(null)
 const joinPassword = ref('')
 const joinError = ref('')
 const joinLoading = ref(false)
+/** 首次进入私有房 vs 403 后需重新输入（授权失效、房间重建、密码错误） */
+const joinModalReason = ref<'first_private' | 'need_password_again'>('first_private')
 
 async function loadRooms() {
   loading.value = true
@@ -38,6 +44,10 @@ async function loadRooms() {
     loading.value = false
   }
 }
+
+watch(lobbyListTick, () => {
+  void loadRooms()
+})
 
 function focusCreateName() {
   nextTick(() => document.getElementById('create-room-name')?.focus())
@@ -70,10 +80,11 @@ async function createRoom() {
   }
 }
 
-function openJoinModal(room: Room) {
+function openJoinModal(room: Room, reason: 'first_private' | 'need_password_again') {
   pendingRoom.value = room
   joinPassword.value = ''
   joinError.value = ''
+  joinModalReason.value = reason
   joinModalOpen.value = true
 }
 
@@ -82,14 +93,24 @@ function closeJoinModal() {
   pendingRoom.value = null
 }
 
+const joinModalIntro = computed(() =>
+  joinModalReason.value === 'first_private'
+    ? '该房间为私有，请输入密码。'
+    : '需要重新输入密码：授权已失效、房间已重建，或密码不正确。',
+)
+
 async function confirmJoin() {
   if (!pendingRoom.value) return
   joinError.value = ''
   joinLoading.value = true
   try {
-    const joined = await joinRoom(auth.accessToken.value, pendingRoom.value.id, joinPassword.value)
+    const joined = await joinRoom(
+      auth.accessToken.value,
+      pendingRoom.value.id,
+      joinPassword.value.trim() || undefined,
+    )
     closeJoinModal()
-    emit('open-room', joined, joinPassword.value)
+    emit('open-room', joined, joinPassword.value.trim() || undefined, joined.left_room_id)
   } catch (err) {
     joinError.value = formatApiError(err, '加入失败，请检查密码或稍后重试')
   } finally {
@@ -97,31 +118,58 @@ async function confirmJoin() {
   }
 }
 
+async function tryEnterPrivateRoom(room: Room) {
+  try {
+    const joined = await joinRoom(auth.accessToken.value, room.id)
+    emit('open-room', joined, undefined, joined.left_room_id)
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 403) {
+      openJoinModal(room, 'first_private')
+      return
+    }
+    if (err instanceof ApiError && err.status === 404) {
+      error.value = '房间已关闭或不存在'
+      await loadRooms()
+      return
+    }
+    error.value = formatApiError(err, '进入房间失败')
+  }
+}
+
 async function openRoom(room: Room) {
   const uid = auth.user.value?.id
-  /** 与后端 canManageRoom 一致：房主或站点管理员访问私有房无需密码 */
   const canSkipPrivatePassword =
     auth.user.value?.role === 'admin' || room.is_owner === true || (!!uid && room.owner_id === uid)
 
   if (room.visibility === 'private' && canSkipPrivatePassword) {
     try {
       const joined = await joinRoom(auth.accessToken.value, room.id)
-      emit('open-room', joined)
-    } catch {
-      openJoinModal(room)
+      emit('open-room', joined, undefined, joined.left_room_id)
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 404) {
+        error.value = '房间已关闭或不存在'
+        await loadRooms()
+        return
+      }
+      openJoinModal(room, 'need_password_again')
     }
     return
   }
 
   if (room.visibility === 'private') {
-    openJoinModal(room)
+    await tryEnterPrivateRoom(room)
     return
   }
   try {
     const joined = await joinRoom(auth.accessToken.value, room.id)
-    emit('open-room', joined)
-  } catch {
-    openJoinModal(room)
+    emit('open-room', joined, undefined, joined.left_room_id)
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 404) {
+      error.value = '房间已关闭或不存在'
+      await loadRooms()
+      return
+    }
+    error.value = formatApiError(err, '进入房间失败')
   }
 }
 
@@ -203,7 +251,7 @@ onMounted(loadRooms)
   </div>
 
   <AppModal v-model="joinModalOpen" :title="pendingRoom ? `加入：${pendingRoom.name}` : '加入房间'" @close="closeJoinModal">
-    <p class="muted" style="margin: 0 0 1rem">该房间为私有，请输入密码。</p>
+    <p class="muted" style="margin: 0 0 1rem">{{ joinModalIntro }}</p>
     <AppInput
       v-model="joinPassword"
       label="房间密码"

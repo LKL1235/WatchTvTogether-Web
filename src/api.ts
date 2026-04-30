@@ -1,8 +1,10 @@
 import type {
   AblyTokenDetails,
+  AdminRoomRow,
   AuthTokens,
   CapabilityReport,
   DownloadTask,
+  JoinRoomResult,
   PlaybackAction,
   PlaybackMode,
   Room,
@@ -96,12 +98,17 @@ export function createRoom(
   )
 }
 
-export function joinRoom(token: string, roomId: string, password = '') {
-  return apiFetch<Room & { is_owner: boolean }>(
+/** 已获服务端授权的私有房可不传 password；请求体仅在有非空密码时包含 password 字段 */
+export function joinRoom(token: string, roomId: string, password?: string) {
+  const body: Record<string, string> = {}
+  if (password !== undefined && password !== '') {
+    body.password = password
+  }
+  return apiFetch<JoinRoomResult>(
     `/api/rooms/${roomId}/join`,
     {
       method: 'POST',
-      body: JSON.stringify({ password }),
+      body: JSON.stringify(body),
     },
     token,
   )
@@ -151,15 +158,28 @@ export function sendRoomControl(
   )
 }
 
+/** 已授权时可不传 password（omit 字段） */
 export function fetchRoomSnapshot(token: string, roomId: string, password?: string) {
+  const body: Record<string, string> = {}
+  if (password !== undefined && password !== '') {
+    body.password = password
+  }
   return apiFetch<RoomSnapshotPayload>(
     `/api/rooms/${roomId}/snapshot`,
     {
       method: 'POST',
-      body: JSON.stringify(password !== undefined ? { password } : {}),
+      body: JSON.stringify(body),
     },
     token,
   )
+}
+
+export function closeRoom(token: string, roomId: string) {
+  return apiFetch<void>(`/api/rooms/${roomId}`, { method: 'DELETE' }, token)
+}
+
+export function fetchAdminRooms(token: string) {
+  return apiFetch<{ items: AdminRoomRow[]; total?: number }>('/api/admin/rooms', {}, token)
 }
 
 export function fetchVideo(token: string, id: string) {
