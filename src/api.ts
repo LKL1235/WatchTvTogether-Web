@@ -4,6 +4,7 @@ import type {
   CapabilityReport,
   DownloadTask,
   PlaybackAction,
+  PlaybackMode,
   Room,
   RoomSnapshotPayload,
   RoomSocketMessage,
@@ -131,7 +132,14 @@ export function fetchAblyToken(
 export function sendRoomControl(
   token: string,
   roomId: string,
-  input: { action: PlaybackAction; position: number; video_id: string; queue?: string[] },
+  input: {
+    action: PlaybackAction
+    position: number
+    video_id: string
+    queue?: string[]
+    playback_mode?: PlaybackMode
+    control_version?: number
+  },
 ) {
   return apiFetch<RoomSocketMessage>(
     `/api/rooms/${roomId}/control`,

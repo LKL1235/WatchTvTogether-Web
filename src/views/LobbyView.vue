@@ -117,8 +117,22 @@ onMounted(loadRooms)
   <div class="lobby-grid">
     <AppCard hover>
       <template #header>
-        <p class="eyebrow">大厅</p>
-        <h2 class="section-title">房间列表</h2>
+        <div class="lobby-card-header">
+          <div>
+            <p class="eyebrow">大厅</p>
+            <h2 class="section-title">房间列表</h2>
+          </div>
+          <AppButton
+            variant="secondary"
+            size="sm"
+            type="button"
+            :loading="loading"
+            :disabled="loading"
+            @click="loadRooms"
+          >
+            刷新
+          </AppButton>
+        </div>
       </template>
       <p v-if="error" class="error" role="alert">{{ error }}</p>
       <div v-if="loading" class="muted" aria-live="polite">正在加载房间…</div>
@@ -189,3 +203,13 @@ onMounted(loadRooms)
     </template>
   </AppModal>
 </template>
+
+<style scoped>
+.lobby-card-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+</style>

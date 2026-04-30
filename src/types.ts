@@ -26,6 +26,9 @@ export interface Room {
 
 export type PlaybackAction = 'play' | 'pause' | 'seek' | 'next' | 'switch'
 
+/** 与后端 model.PlaybackMode 一致 */
+export type PlaybackMode = 'sequential' | 'loop'
+
 export interface RoomState {
   room_id: string
   video_id?: string
@@ -33,6 +36,9 @@ export interface RoomState {
   queue?: string[]
   action: PlaybackAction
   position: number
+  playback_mode?: PlaybackMode
+  video_duration?: number
+  control_version?: number
   updated_by?: string
   updated_at?: string
 }
@@ -45,6 +51,8 @@ export interface RoomSocketMessage {
   position?: number
   video_id?: string
   queue?: string[]
+  playback_mode?: PlaybackMode
+  control_version?: number
   timestamp?: number
   payload?: RoomSnapshotPayload | Record<string, unknown>
   user?: {
