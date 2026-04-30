@@ -98,6 +98,21 @@ async function confirmJoin() {
 }
 
 async function openRoom(room: Room) {
+  const uid = auth.user.value?.id
+  /** 与后端 canManageRoom 一致：房主或站点管理员访问私有房无需密码 */
+  const canSkipPrivatePassword =
+    auth.user.value?.role === 'admin' || room.is_owner === true || (!!uid && room.owner_id === uid)
+
+  if (room.visibility === 'private' && canSkipPrivatePassword) {
+    try {
+      const joined = await joinRoom(auth.accessToken.value, room.id)
+      emit('open-room', joined)
+    } catch {
+      openJoinModal(room)
+    }
+    return
+  }
+
   if (room.visibility === 'private') {
     openJoinModal(room)
     return
