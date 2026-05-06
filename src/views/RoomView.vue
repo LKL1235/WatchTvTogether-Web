@@ -422,7 +422,8 @@ function snapshotPassword(): string | undefined {
   return p || undefined
 }
 
-async function refreshAuthoritativeState() {
+async function refreshAuthoritativeState(opts?: { syncVideo?: boolean }) {
+  const syncVideo = opts?.syncVideo ?? !canControl.value
   const s = await fetchRoomState(auth.accessToken.value, props.room.id)
   const prevVideoId = currentVideo.value
   mergePlaybackFieldsFromRoomState(s)
@@ -433,7 +434,9 @@ async function refreshAuthoritativeState() {
   if (!canControl.value && prevVideoId !== (s.video_id || '')) {
     viewerLocalPause.value = false
   }
-  runWithRemoteSync(() => syncPlayerFromState(aligned.action, aligned.position))
+  if (syncVideo) {
+    runWithRemoteSync(() => syncPlayerFromState(aligned.action, aligned.position))
+  }
 }
 
 async function submitOwnerControl(input: {
@@ -542,10 +545,16 @@ function applyStateFromSyncMessage(message: RoomSocketMessage) {
   nextState = refineForNow(nextState)
   state.value = nextState
   mergePlaybackFieldsFromRoomState(nextState)
-  runWithRemoteSync(() => syncPlayerFromState(nextState.action, nextState.position))
+  if (!canControl.value) {
+    runWithRemoteSync(() => syncPlayerFromState(nextState.action, nextState.position))
+  }
 }
 
-async function applyRoomSnapshot(payload: RoomSnapshotPayload) {
+async function applyRoomSnapshot(
+  payload: RoomSnapshotPayload,
+  opts?: { syncVideo?: boolean },
+) {
+  const syncVideo = opts?.syncVideo ?? !canControl.value
   if (payload.ably?.channel) {
     ablyChannelName.value = payload.ably.channel
   }
@@ -579,7 +588,7 @@ async function applyRoomSnapshot(payload: RoomSnapshotPayload) {
   await nextTick()
   loadPlaybackSource()
   await nextTick()
-  if (state.value) {
+  if (state.value && syncVideo) {
     const aligned = advancePlayPositionSinceServerUpdatedAt(state.value, Date.now(), playbackMode.value)
     state.value = aligned
     runWithRemoteSync(() => syncPlayerFromState(aligned.action, aligned.position))
@@ -590,7 +599,7 @@ onMounted(async () => {
   roomLoadError.value = ''
   try {
     const snapshot = await fetchRoomSnapshot(auth.accessToken.value, props.room.id, snapshotPassword())
-    await applyRoomSnapshot(snapshot)
+    await applyRoomSnapshot(snapshot, { syncVideo: true })
     if (!ablyChannelName.value) {
       roomLoadError.value = '房间快照未返回 Ably 频道名，无法建立实时连接'
       return
