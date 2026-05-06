@@ -76,6 +76,9 @@ let hls: Hls | null = null
 const scrubTime = ref(0)
 const scrubDragging = ref(false)
 const videoDuration = ref(0)
+const localVideoPaused = ref(true)
+const viewerMuted = ref(false)
+const viewerVolume = ref(1)
 const currentUser = computed(() => auth.user.value)
 
 const runtimeRoomPassword = ref(props.joinPassword ?? '')
@@ -90,9 +93,7 @@ const isRoomOwnerOrAdmin = computed(
 
 const canControl = computed(() => isRoomOwnerOrAdmin.value)
 
-const ownerVideoListeners = computed(() =>
-  canControl.value ? { play: onOwnerPlay, pause: onOwnerPause, seeked: onOwnerSeeked } : {},
-)
+const ownerVideoListeners = computed(() => (canControl.value ? { seeked: onOwnerSeeked } : {}))
 
 const {
   connected: rtConnected,
@@ -163,6 +164,18 @@ const connectionStatusLabel = computed(() => {
 })
 
 const selectedVideo = computed(() => queue.value.find((item) => item.id === currentVideo.value))
+const displayedDuration = computed(() => {
+  const candidates = [videoDuration.value, selectedVideo.value?.duration ?? 0]
+  const duration = candidates.find((n) => Number.isFinite(n) && n > 0)
+  return duration ?? 0
+})
+const progressMax = computed(() => Math.max(0.01, displayedDuration.value || 600))
+const displayedCurrentTime = computed(() => {
+  const max = displayedDuration.value || progressMax.value
+  if (!Number.isFinite(scrubTime.value)) return 0
+  return Math.min(Math.max(scrubTime.value, 0), max)
+})
+const isPlayingForUi = computed(() => !localVideoPaused.value && state.value?.action === 'play')
 
 const shareModalOpen = ref(false)
 const shareCopyFeedback = ref('')
@@ -372,6 +385,16 @@ function getVideoTime(): number {
   const v = videoElement.value
   if (v && Number.isFinite(v.currentTime)) return v.currentTime
   return Number(state.value?.position ?? 0)
+}
+
+function formatPlaybackTime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds <= 0) return '0:00'
+  const total = Math.floor(seconds)
+  const hrs = Math.floor(total / 3600)
+  const mins = Math.floor((total % 3600) / 60)
+  const secs = total % 60
+  if (hrs > 0) return `${hrs}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
+  return `${mins}:${String(secs).padStart(2, '0')}`
 }
 
 function snapshotPassword(): string | undefined {
@@ -644,6 +667,9 @@ function onVideoLoadedMetadata() {
   const v = videoElement.value
   videoDuration.value = v && Number.isFinite(v.duration) && v.duration > 0 ? v.duration : 0
   scrubTime.value = v?.currentTime ?? 0
+  localVideoPaused.value = v?.paused ?? true
+  viewerMuted.value = v?.muted ?? false
+  viewerVolume.value = v?.volume ?? 1
 }
 
 function onVideoTimeUpdate() {
@@ -668,6 +694,32 @@ function onScrubInput(e: Event) {
   scrubTime.value = n
   const v = videoElement.value
   if (v && canControl.value) v.currentTime = n
+}
+
+function onVideoPlay() {
+  localVideoPaused.value = false
+  if (canControl.value) onOwnerPlay()
+}
+
+function onVideoPause() {
+  localVideoPaused.value = true
+  if (canControl.value) onOwnerPause()
+}
+
+async function onPrimaryPlaybackClick() {
+  if (isPlayingForUi.value) {
+    if (canControl.value) {
+      onOwnerPause()
+    } else {
+      onViewerPauseClick()
+    }
+    return
+  }
+  if (canControl.value) {
+    await onOwnerBarPlayClick()
+  } else {
+    await onViewerPlayClick()
+  }
 }
 
 function loadPlaybackSource() {
@@ -1057,13 +1109,20 @@ function toggleViewerMute() {
   const v = videoElement.value
   if (!v) return
   v.muted = !v.muted
+  viewerMuted.value = v.muted
 }
 
 function setViewerVolume(e: Event) {
   const v = videoElement.value
   if (!v) return
   const t = e.target as HTMLInputElement
-  v.volume = Number(t.value)
+  const nextVolume = Number(t.value)
+  v.volume = nextVolume
+  viewerVolume.value = nextVolume
+  if (nextVolume > 0 && v.muted) {
+    v.muted = false
+    viewerMuted.value = false
+  }
 }
 </script>
 
@@ -1124,6 +1183,8 @@ function setViewerVolume(e: Event) {
               controlsList="nodownload noplaybackrate noremoteplayback"
               @loadedmetadata="onVideoLoadedMetadata"
               @timeupdate="onVideoTimeUpdate"
+              @play="onVideoPlay"
+              @pause="onVideoPause"
               @enterpictureinpicture="onEnterPictureInPicture"
               v-on="ownerVideoListeners"
               @ended="onVideoEnded"
@@ -1151,46 +1212,59 @@ function setViewerVolume(e: Event) {
               :class="{ 'player-chrome--hidden': !controlsVisible && !showBigPlayOverlay }"
               @pointermove.stop="showControlsBar"
             >
-              <div v-if="canControl" class="owner-chrome__row">
-                <AppButton size="sm" variant="primary" type="button" @click.stop="onOwnerBarPlayClick">播放</AppButton>
-                <AppButton size="sm" variant="secondary" type="button" @click.stop="onOwnerPause">暂停</AppButton>
-                <label class="owner-chrome__scrub">
-                  <span class="sr-only">进度</span>
+              <label class="player-chrome__scrub" @pointerdown.stop @click.stop>
+                <span class="sr-only">进度</span>
+                <input
+                  class="player-chrome__range"
+                  type="range"
+                  :min="0"
+                  :max="progressMax"
+                  step="0.25"
+                  :value="displayedCurrentTime"
+                  :disabled="!canControl"
+                  :aria-valuetext="`${formatPlaybackTime(displayedCurrentTime)} / ${formatPlaybackTime(displayedDuration)}`"
+                  @pointerdown.stop="onScrubPointerDown"
+                  @pointerup.stop="onScrubPointerUp"
+                  @input.stop="onScrubInput"
+                />
+              </label>
+              <div class="player-chrome__control-row">
+                <button
+                  class="player-chrome__icon-button player-chrome__play-button"
+                  type="button"
+                  :aria-label="isPlayingForUi ? '暂停' : '播放'"
+                  @click.stop="onPrimaryPlaybackClick"
+                >
+                  <span aria-hidden="true">{{ isPlayingForUi ? '❚❚' : '▶' }}</span>
+                </button>
+                <div class="player-chrome__time" aria-live="off">
+                  <span>{{ formatPlaybackTime(displayedCurrentTime) }}</span>
+                  <span class="player-chrome__time-separator">/</span>
+                  <span>{{ formatPlaybackTime(displayedDuration) }}</span>
+                </div>
+                <div class="player-chrome__spacer" />
+                <label class="player-chrome__volume" @pointerdown.stop @click.stop>
+                  <span class="sr-only">音量</span>
                   <input
-                    class="ui-input owner-chrome__range"
-                    type="range"
-                    :min="0"
-                    :max="Math.max(0.01, videoDuration || selectedVideo?.duration || 600)"
-                    step="0.25"
-                    :value="scrubTime"
-                    @pointerdown.stop="onScrubPointerDown"
-                    @pointerup.stop="onScrubPointerUp"
-                    @input.stop="onScrubInput"
-                  />
-                </label>
-              </div>
-              <div v-if="!canControl" class="viewer-chrome__row viewer-chrome__row--controls">
-                <AppButton size="sm" variant="primary" type="button" @click.stop="onViewerPlayClick">播放</AppButton>
-                <AppButton size="sm" variant="secondary" type="button" @click.stop="onViewerPauseClick">暂停</AppButton>
-              </div>
-              <div class="player-chrome__volume-row">
-                <label class="viewer-chrome__label" @pointerdown.stop @click.stop>
-                  音量
-                  <input
-                    class="ui-input"
+                    class="player-chrome__volume-range"
                     type="range"
                     min="0"
                     max="1"
                     step="0.05"
-                    :value="videoElement?.volume ?? 1"
+                    :value="viewerVolume"
                     @focus="volumePopoverOpen = true"
                     @blur="volumePopoverOpen = false"
                     @input="setViewerVolume"
                   />
                 </label>
-                <AppButton size="sm" variant="secondary" type="button" @click.stop="toggleViewerMute">
-                  {{ videoElement?.muted ? '取消静音' : '静音' }}
-                </AppButton>
+                <button
+                  class="player-chrome__icon-button"
+                  type="button"
+                  :aria-label="viewerMuted ? '取消静音' : '静音'"
+                  @click.stop="toggleViewerMute"
+                >
+                  <span aria-hidden="true">{{ viewerMuted ? '🔇' : '🔊' }}</span>
+                </button>
               </div>
             </div>
           </div>
@@ -1371,15 +1445,16 @@ function setViewerVolume(e: Event) {
   left: 0;
   right: 0;
   bottom: 0;
-  padding: 0.5rem 0.75rem 0.65rem;
-  background: linear-gradient(transparent, rgba(2, 6, 23, 0.85));
+  padding: 1.65rem 0.75rem 0.65rem;
+  background: linear-gradient(180deg, transparent 0%, rgba(0, 0, 0, 0.28) 42%, rgba(0, 0, 0, 0.46) 100%);
   color: #f8fafc;
   display: flex;
   flex-direction: column;
-  gap: 0.35rem;
+  gap: 0.45rem;
   z-index: 4;
   transition: opacity 0.25s ease, transform 0.25s ease;
   pointer-events: none;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.65);
 }
 .player-chrome > * {
   pointer-events: auto;
@@ -1392,33 +1467,145 @@ function setViewerVolume(e: Event) {
 .player-chrome--hidden > * {
   pointer-events: none;
 }
-.owner-chrome__row {
+.player-chrome__control-row {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
+  min-height: 2.1rem;
   gap: 0.5rem;
 }
-.owner-chrome__scrub {
-  flex: 1 1 8rem;
+.player-chrome__scrub {
   display: flex;
-  flex-direction: column;
-  gap: 0.15rem;
-  font-size: 0.75rem;
   margin: 0;
 }
-.owner-chrome__range {
+.player-chrome__range {
   width: 100%;
-  min-height: 2rem;
+  height: 0.95rem;
+  margin: 0;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+  accent-color: #f59e0b;
 }
-.player-chrome__volume-row {
+.player-chrome__range:disabled {
+  cursor: default;
+}
+.player-chrome__range::-webkit-slider-runnable-track,
+.player-chrome__volume-range::-webkit-slider-runnable-track {
+  height: 0.2rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.38);
+}
+.player-chrome__range::-webkit-slider-thumb,
+.player-chrome__volume-range::-webkit-slider-thumb {
+  appearance: none;
+  width: 0.82rem;
+  height: 0.82rem;
+  margin-top: -0.31rem;
+  border-radius: 999px;
+  border: 2px solid #fff;
+  background: #f59e0b;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.55);
+}
+.player-chrome__range::-moz-range-track,
+.player-chrome__volume-range::-moz-range-track {
+  height: 0.2rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.38);
+}
+.player-chrome__range::-moz-range-progress,
+.player-chrome__volume-range::-moz-range-progress {
+  height: 0.2rem;
+  border-radius: 999px;
+  background: #f59e0b;
+}
+.player-chrome__range::-moz-range-thumb,
+.player-chrome__volume-range::-moz-range-thumb {
+  width: 0.72rem;
+  height: 0.72rem;
+  border-radius: 999px;
+  border: 2px solid #fff;
+  background: #f59e0b;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.55);
+}
+.player-chrome__range:focus-visible,
+.player-chrome__volume-range:focus-visible,
+.player-chrome__icon-button:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, 0.95);
+  outline-offset: 3px;
+}
+.player-chrome__icon-button {
+  display: inline-grid;
+  place-items: center;
+  width: 2.1rem;
+  height: 2.1rem;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: #fff;
+  font-size: 1.08rem;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s ease, transform 0.15s ease;
+}
+.player-chrome__icon-button:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+.player-chrome__icon-button:active {
+  transform: scale(0.94);
+}
+.player-chrome__play-button {
+  font-size: 1.15rem;
+}
+.player-chrome__time {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.32rem;
+  min-width: 7.4rem;
+  color: rgba(255, 255, 255, 0.94);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.86rem;
+  font-weight: 600;
+}
+.player-chrome__time-separator {
+  color: rgba(255, 255, 255, 0.66);
+}
+.player-chrome__spacer {
+  flex: 1;
+}
+.player-chrome__volume {
   display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  gap: 0.5rem;
+  align-items: center;
+  width: clamp(4.5rem, 12vw, 7rem);
+  margin: 0;
 }
-.player-chrome .viewer-chrome__label {
-  color: #e2e8f0;
-  font-size: 0.8125rem;
+.player-chrome__volume-range {
+  width: 100%;
+  height: 0.95rem;
+  margin: 0;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+  accent-color: #fff;
+}
+@media (max-width: 640px) {
+  .player-chrome {
+    padding: 1.35rem 0.55rem 0.5rem;
+  }
+  .player-chrome__control-row {
+    gap: 0.35rem;
+  }
+  .player-chrome__icon-button {
+    width: 1.9rem;
+    height: 1.9rem;
+  }
+  .player-chrome__time {
+    min-width: 5.9rem;
+    font-size: 0.76rem;
+  }
+  .player-chrome__volume {
+    display: none;
+  }
 }
 .share-url-field {
   width: 100%;
