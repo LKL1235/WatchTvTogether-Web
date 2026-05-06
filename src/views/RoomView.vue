@@ -1021,7 +1021,12 @@ function onEnterPictureInPicture(ev: Event) {
   } catch {
     // ignore
   }
-  showRoomActivity('当前房间不支持小窗播放，已退出画中画。')
+  // 触屏设备上避免横幅提示抢占注意力；桌面端保留说明
+  const coarse =
+    typeof window !== 'undefined' && window.matchMedia?.('(pointer: coarse)').matches === true
+  if (!coarse) {
+    showRoomActivity('当前房间不支持小窗播放，已退出画中画。')
+  }
 }
 
 function onVideoWrapperClick(ev: MouseEvent) {
@@ -1197,6 +1202,7 @@ function setViewerVolume(e: Event) {
               class="room-video"
               :controls="false"
               playsinline
+              webkit-playsinline
               disablePictureInPicture
               disableRemotePlayback
               controlsList="nodownload noplaybackrate noremoteplayback"
@@ -1208,6 +1214,8 @@ function setViewerVolume(e: Event) {
               v-on="ownerVideoListeners"
               @ended="onVideoEnded"
             />
+            <!-- 拦截对 video 的直接触摸，避免移动端系统小窗/画中画入口劫持手势；事件经此层冒泡到 .video-frame -->
+            <div class="player-video-hitlayer" aria-hidden="true" />
             <div
               v-if="showBigPlayOverlay"
               class="big-play-overlay"
@@ -1448,6 +1456,14 @@ function setViewerVolume(e: Event) {
   width: 100%;
   max-height: min(70vh, 520px);
   vertical-align: middle;
+  /* 禁止指针直达 video，防止移动端原生小窗/全屏手势抢走自定义控制条 */
+  pointer-events: none;
+}
+.player-video-hitlayer {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  touch-action: manipulation;
 }
 .big-play-overlay {
   position: absolute;
