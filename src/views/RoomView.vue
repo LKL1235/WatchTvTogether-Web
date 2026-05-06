@@ -21,7 +21,16 @@ import {
 import { waitForVideoReady } from '../utils/waitForVideo'
 import { displayNameForUser } from '../utils/userDisplay'
 import { clampDisplayTitle, shortTitleFromUrl } from '../utils/queueDisplay'
-import type { PlaybackMode, Room, RoomPresenceMember, RoomSnapshotPayload, RoomState, RoomSocketMessage, Video } from '../types'
+import type {
+  PlaybackAction,
+  PlaybackMode,
+  Room,
+  RoomPresenceMember,
+  RoomSnapshotPayload,
+  RoomState,
+  RoomSocketMessage,
+  Video,
+} from '../types'
 import AppButton from '../components/ui/AppButton.vue'
 import AppCard from '../components/ui/AppCard.vue'
 import AppModal from '../components/ui/AppModal.vue'
@@ -149,8 +158,13 @@ watch(rtConnectionState, (s, prev) => {
   }
 })
 
+/** 与 syncPlayerFromState 一致：这些 action 下房间意图为「正在播」 */
+function roomActionImpliesPlayback(action: PlaybackAction | undefined): boolean {
+  return action === 'play' || action === 'seek' || action === 'next' || action === 'switch'
+}
+
 const showAutoplayBlockedOverlay = computed(
-  () => !canControl.value && autoplayDeniedCount.value > 0 && state.value?.action === 'play',
+  () => !canControl.value && autoplayDeniedCount.value > 0 && roomActionImpliesPlayback(state.value?.action),
 )
 
 const connectionStatusLabel = computed(() => {
@@ -175,7 +189,7 @@ const displayedCurrentTime = computed(() => {
   if (!Number.isFinite(scrubTime.value)) return 0
   return Math.min(Math.max(scrubTime.value, 0), max)
 })
-const isPlayingForUi = computed(() => !localVideoPaused.value && state.value?.action === 'play')
+const isPlayingForUi = computed(() => !localVideoPaused.value && roomActionImpliesPlayback(state.value?.action))
 
 const shareModalOpen = ref(false)
 const shareCopyFeedback = ref('')
@@ -224,7 +238,12 @@ function scheduleControlsHide() {
     clearTimeout(controlsHideTimer)
     controlsHideTimer = null
   }
-  if (!canControl.value && !volumePopoverOpen.value && state.value?.action === 'play' && !showBigPlayOverlay.value) {
+  if (
+    !canControl.value &&
+    !volumePopoverOpen.value &&
+    roomActionImpliesPlayback(state.value?.action) &&
+    !showBigPlayOverlay.value
+  ) {
     controlsHideTimer = setTimeout(() => {
       controlsHideTimer = null
       controlsVisible.value = false
@@ -254,7 +273,7 @@ function onVideoAreaFocusIn() {
 }
 
 watch([() => state.value?.action, volumePopoverOpen, showBigPlayOverlay], () => {
-  if (state.value?.action !== 'play' || volumePopoverOpen.value || showBigPlayOverlay.value) {
+  if (!roomActionImpliesPlayback(state.value?.action) || volumePopoverOpen.value || showBigPlayOverlay.value) {
     if (controlsHideTimer) {
       clearTimeout(controlsHideTimer)
       controlsHideTimer = null
@@ -824,7 +843,7 @@ async function onSyncProgressClick() {
   await resyncPlaybackFromServer()
   const v = videoElement.value
   const s = state.value
-  if (v && s && s.action === 'play') {
+  if (v && s && roomActionImpliesPlayback(s.action)) {
     try {
       await v.play()
       autoplayDeniedCount.value = 0
@@ -850,7 +869,7 @@ async function onViewerPlayClick() {
   await resyncPlaybackFromServer()
   const v = videoElement.value
   const s = state.value
-  if (v && s && s.action === 'play') {
+  if (v && s && roomActionImpliesPlayback(s.action)) {
     try {
       await v.play()
       autoplayDeniedCount.value = 0
