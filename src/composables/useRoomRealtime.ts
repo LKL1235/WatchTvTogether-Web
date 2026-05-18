@@ -3,7 +3,40 @@ import { onBeforeUnmount, ref, shallowRef } from 'vue'
 
 import { ApiError, fetchAblyToken } from '../api'
 import { useAuthStore } from '../stores/auth'
-import type { RoomPresenceMember, RoomSnapshotPayload, RoomSocketMessage, User } from '../types'
+import type { RoomChatMessage, RoomPresenceMember, RoomSnapshotPayload, RoomSocketMessage, User } from '../types'
+
+function normalizeRoomChatMessage(data: unknown): RoomChatMessage | null {
+  if (data == null || typeof data !== 'object') return null
+  const d = data as Record<string, unknown>
+  if (d.type !== 'chat') return null
+  const seq = typeof d.seq === 'number' ? d.seq : Number(d.seq)
+  if (!Number.isFinite(seq)) return null
+  const streamId = typeof d.stream_id === 'string' ? d.stream_id : ''
+  const roomId = typeof d.room_id === 'string' ? d.room_id : ''
+  const text = typeof d.text === 'string' ? d.text : ''
+  const sentAt = typeof d.sent_at === 'number' ? d.sent_at : Number(d.sent_at)
+  const u = d.user
+  if (typeof u !== 'object' || u == null) return null
+  const ur = u as Record<string, unknown>
+  const id = typeof ur.id === 'string' ? ur.id : ''
+  const username = typeof ur.username === 'string' ? ur.username : ''
+  if (!id || !username) return null
+  return {
+    type: 'chat',
+    seq,
+    stream_id: streamId,
+    room_id: roomId,
+    user: {
+      id,
+      username,
+      nickname: typeof ur.nickname === 'string' ? ur.nickname : undefined,
+      role: typeof ur.role === 'string' ? ur.role : 'user',
+      is_owner: Boolean(ur.is_owner),
+    },
+    text,
+    sent_at: Number.isFinite(sentAt) ? sentAt : 0,
+  }
+}
 
 function normalizeAblyMessage(name: string, data: unknown): RoomSocketMessage | null {
   if (data == null) return null
@@ -46,6 +79,7 @@ export function useRoomRealtime(options: {
 
   const client = shallowRef<Ably.Realtime | null>(null)
   let channel: Ably.RealtimeChannel | null = null
+  const chatMessages = ref<RoomChatMessage[]>([])
 
   function mergeMembersFromPresence(presence: Ably.PresenceMessage) {
     const data = presence.data
@@ -98,7 +132,18 @@ export function useRoomRealtime(options: {
   function attachChannel(next: Ably.RealtimeChannel) {
     channel = next
     next.subscribe((message) => {
-      const normalized = normalizeAblyMessage(message.name ?? '', message.data)
+      const name = message.name ?? ''
+      if (name === 'room.chat') {
+        const chat = normalizeRoomChatMessage(message.data)
+        if (chat) {
+          const exists = chatMessages.value.some((m) => m.seq === chat.seq)
+          if (!exists) {
+            chatMessages.value = [chat, ...chatMessages.value].slice(0, 200)
+          }
+        }
+        return
+      }
+      const normalized = normalizeAblyMessage(name, message.data)
       if (!normalized) return
       lastMessage.value = normalized
       events.value = [normalized, ...events.value].slice(0, 30)
@@ -144,6 +189,11 @@ export function useRoomRealtime(options: {
     connected.value = false
     connecting.value = false
     members.value = []
+    chatMessages.value = []
+  }
+
+  function clearChat() {
+    chatMessages.value = []
   }
 
   function connect() {
@@ -250,8 +300,10 @@ export function useRoomRealtime(options: {
     events,
     members,
     error,
+    chatMessages,
     connect,
     disconnect,
+    clearChat,
     refreshPresenceMembers,
   }
 }

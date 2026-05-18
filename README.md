@@ -21,7 +21,7 @@ WatchTvTogether 的 Vue 3 前端项目，用于实现「一起看电视/电影�
 
 ## 实时同步（Ably）
 
-房间内的播放同步与事件不再通过浏览器连接后端 WebSocket。进入房间时先调用 `POST /api/rooms/:roomId/snapshot` 获取状态与 `ably.channel`，再使用 Ably Realtime 订阅该频道上的 `room.sync`、`room.event`、`room.snapshot`；在线成员列表由 **同一控制频道上的 Presence** 维护。`authCallback` 请求 `POST /api/ably/token` 时，后端返回 **Ably 用 JWT**（JSON：`token`、`expires_at`），前端将 `token` 交给 Ably SDK；临近过期时 SDK 会再次调用 `authCallback`。若返回 401，前端会先尝试 `POST /api/auth/refresh` 刷新本系统 access token 再重试一次；403 时提示检查私有房密码或重新加入。若前后端或预览域名变更，需在后端与 [Ably](https://ably.com) 仪表盘中核对允许的域名与密钥策略。
+房间内的播放同步与事件不再通过浏览器连接后端 WebSocket。进入房间时先调用 `POST /api/rooms/:roomId/snapshot` 获取状态与 `ably.channel`，再使用 Ably Realtime 订阅该频道上的 `room.sync`、`room.event`、`room.snapshot` 以及 **`room.chat`（聊天）**；在线成员列表由 **同一控制频道上的 Presence** 维护。聊天历史通过 **`GET /api/rooms/:roomId/chat`** 拉取（Redis Stream），发送通过 **`POST /api/rooms/:roomId/chat`**，与播放控制一样不经由客户端 Ably `publish`。
 
 私有房间的密码可由大厅加入后传入房间页，或由分享链接 `?password=` 在已登录场景下由路由传入，用于 snapshot 与 Ably JWT 续签；刷新后若 URL 仍带密码则可再次读取。
 
@@ -48,6 +48,7 @@ WatchTvTogether 的 Vue 3 前端项目，用于实现「一起看电视/电影�
    - 队列管理：手动 URL（可选显示名称）、上移下移、删除、切换；队列展示名可在本机编辑（跨成员持久名需后端字段）。
    - 分享：`/room/:roomId` 深链，私有房可在查询参数中带 `password`（登录后加入）；分享弹窗可复制链接。
    - 在线成员（Ably Presence）与踢人（房主/管理员）。
+   - **聊天**：侧栏加载 `GET /api/rooms/:roomId/chat` 历史；发送 `POST /api/rooms/:roomId/chat`；实时增量由 Ably 同频道 `room.chat` 推送（后端需 Redis；否则 503，前端提示聊天暂不可用）。超长返回 413，限流 429。
    - 开发模式下展示最近实时消息与连接状态。
 
 4. **管理员后台页（AdminView）**
@@ -77,6 +78,8 @@ WatchTvTogether 的 Vue 3 前端项目，用于实现「一起看电视/电影�
 - `GET /api/rooms/{roomId}`：获取单个房间详情
 - `GET /api/rooms/{roomId}/state`：轻量读取播放状态
 - `POST /api/rooms/{roomId}/snapshot`：进入房间时完整初始化快照（含 Ably 频道名）
+- `GET /api/rooms/{roomId}/chat`：聊天历史（`before_id`、`limit`、可选 `password` 查询参数）
+- `POST /api/rooms/{roomId}/chat`：发送聊天（`text`、可选 `password`）
 - `POST /api/ably/token`：签发当前房间的 **Ably JWT**（JSON：`token`、`expires_at`；仅 subscribe / presence / history）
 - `POST /api/rooms/{roomId}/control`：房主/管理员提交播放控制，服务端发布 `room.sync`
 - `POST /api/rooms/{roomId}/kick/{userId}`：踢出成员
