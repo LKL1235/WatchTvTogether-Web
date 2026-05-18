@@ -80,6 +80,35 @@ export interface RoomState {
   updated_at?: string
 }
 
+/** Ably `room.chat` 与 HTTP 聊天接口消息体（与后端 room.ChatMessage 对齐） */
+export interface RoomChatMessage {
+  type: string
+  seq: number
+  stream_id: string
+  room_id: string
+  user: {
+    id: string
+    username: string
+    nickname?: string
+    role: string
+    is_owner?: boolean
+  }
+  text: string
+  sent_at: number
+}
+
+/** GET /api/rooms/:id/chat */
+export interface RoomChatListResponse {
+  items: RoomChatMessage[]
+  has_more: boolean
+}
+
+/** POST /api/rooms/:id/chat */
+export interface PostRoomChatResponse {
+  message: RoomChatMessage
+  realtime: 'ok' | 'deferred'
+}
+
 /** Ably / HTTP 广播的同步与控制消息体，与后端 WebSocket 时代字段对齐 */
 export interface RoomSocketMessage {
   type: string

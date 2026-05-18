@@ -4,10 +4,13 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   API_BASE,
   ApiError,
+  fetchRoomChatHistory,
   fetchRoomSnapshot,
   fetchRoomState,
   fetchVideo,
   kickRoomMember,
+  postRoomChat,
+  ROOM_CHAT_MAX_TEXT_RUNES,
   sendRoomControl,
 } from '../api'
 import { useRoomRealtime } from '../composables/useRoomRealtime'
@@ -112,6 +115,8 @@ const {
   events: rtEvents,
   members,
   error: rtError,
+  chatMessages: rtChatMessages,
+  clearChat: clearRtChatMessages,
   connect: connectRealtime,
   disconnect: disconnectRealtime,
 } = useRoomRealtime({
@@ -138,6 +143,98 @@ watch(
     if (pwd) runtimeRoomPassword.value = pwd
   },
   { immediate: true },
+)
+
+const chatDraft = ref('')
+const chatLoading = ref(false)
+const chatBanner = ref<string | null>(null)
+const chatSendError = ref<string | null>(null)
+const chatSending = ref(false)
+const chatBlocked = ref(false)
+
+const chatListAsc = computed(() => {
+  const copy = [...rtChatMessages.value]
+  copy.sort((a, b) => a.seq - b.seq)
+  return copy
+})
+
+function countChatRunes(s: string): number {
+  return [...s].length
+}
+
+async function loadRoomChatHistory() {
+  if (!auth.accessToken.value) return
+  chatLoading.value = true
+  chatBanner.value = null
+  try {
+    const res = await fetchRoomChatHistory(auth.accessToken.value, props.room.id, {
+      limit: 80,
+      password: snapshotPassword(),
+    })
+    rtChatMessages.value = res.items
+    chatBlocked.value = false
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 503) {
+      chatBanner.value = '聊天服务暂不可用，请稍后再试'
+      chatBlocked.value = true
+    } else if (!(e instanceof ApiError && e.status === 401)) {
+      chatBanner.value = formatApiError(e, '加载聊天记录失败')
+    }
+  } finally {
+    chatLoading.value = false
+  }
+}
+
+async function sendChatMessage() {
+  if (chatBlocked.value || chatSending.value) return
+  const text = chatDraft.value.trim()
+  if (!text) return
+  if (countChatRunes(text) > ROOM_CHAT_MAX_TEXT_RUNES) {
+    chatSendError.value = '消息过长'
+    return
+  }
+  chatSendError.value = null
+  chatSending.value = true
+  try {
+    const pwd = snapshotPassword()
+    const body: { text: string; password?: string } = { text }
+    if (pwd) body.password = pwd
+    const res = await postRoomChat(auth.accessToken.value, props.room.id, body)
+    const m = res.message
+    if (!rtChatMessages.value.some((x) => x.seq === m.seq)) {
+      rtChatMessages.value = [m, ...rtChatMessages.value].slice(0, 200)
+    }
+    chatDraft.value = ''
+    if (res.realtime === 'deferred') {
+      showRoomActivity('消息已保存，实时推送可能略有延迟')
+    }
+  } catch (e) {
+    if (e instanceof ApiError) {
+      if (e.status === 413) chatSendError.value = '消息过长'
+      else if (e.status === 503) {
+        chatSendError.value = '聊天服务暂不可用，请稍后再试'
+        chatBlocked.value = true
+      } else if (e.status === 429) chatSendError.value = '发送过快，请稍后'
+      else chatSendError.value = formatApiError(e)
+    } else {
+      chatSendError.value = formatApiError(e)
+    }
+  } finally {
+    chatSending.value = false
+  }
+}
+
+watch(
+  () => props.room.id,
+  (_id, prev) => {
+    if (prev !== undefined && prev !== _id) {
+      clearRtChatMessages()
+      chatDraft.value = ''
+      chatBanner.value = null
+      chatSendError.value = null
+      void loadRoomChatHistory()
+    }
+  },
 )
 
 watch(
@@ -596,6 +693,7 @@ onMounted(async () => {
       return
     }
     connectRealtime()
+    void loadRoomChatHistory()
     showControlsBar()
   } catch (err) {
     if (err instanceof ApiError && err.status === 404) {
@@ -833,6 +931,7 @@ async function resyncPlaybackFromServer() {
 }
 
 function onRoomClosed() {
+  clearRtChatMessages()
   window.alert('房间已关闭')
   emit('admin-rooms-changed')
   emit('back')
@@ -1364,6 +1463,37 @@ function setViewerVolume(e: Event) {
       </AppCard>
 
       <AppCard padding="compact">
+        <h3 class="sidebar-heading">聊天</h3>
+        <p v-if="chatBanner" class="muted" role="status">{{ chatBanner }}</p>
+        <p v-if="chatLoading" class="muted">加载聊天记录…</p>
+        <div v-else class="room-chat-log" role="log" aria-live="polite">
+          <p v-if="!chatListAsc.length" class="muted">暂无消息</p>
+          <div v-for="m in chatListAsc" :key="m.stream_id || m.seq" class="room-chat-line">
+            <strong>{{ displayNameForUser(m.user) }}</strong>
+            <span class="muted"> · </span>
+            <span>{{ m.text }}</span>
+          </div>
+        </div>
+        <form class="room-chat-form" @submit.prevent="sendChatMessage">
+          <textarea
+            v-model="chatDraft"
+            class="ui-input room-chat-input"
+            rows="2"
+            :disabled="chatSending || chatBlocked"
+            :placeholder="chatBlocked ? '聊天暂不可用' : '发送消息…'"
+            maxlength="8000"
+          />
+          <div class="room-chat-meta muted">
+            {{ countChatRunes(chatDraft) }} / {{ ROOM_CHAT_MAX_TEXT_RUNES }}
+          </div>
+          <p v-if="chatSendError" class="error" role="alert">{{ chatSendError }}</p>
+          <AppButton type="submit" size="sm" :disabled="chatSending || chatBlocked || !chatDraft.trim()">
+            发送
+          </AppButton>
+        </form>
+      </AppCard>
+
+      <AppCard padding="compact">
         <h3 class="sidebar-heading">在线成员（Ably Presence）</h3>
         <div class="member" v-for="member in members" :key="member.connectionId || member.id">
           <span class="avatar">{{ displayNameForUser(member).slice(0, 1).toUpperCase() }}</span>
@@ -1745,5 +1875,33 @@ function setViewerVolume(e: Event) {
   .room-sidebar-close {
     display: none;
   }
+}
+.room-chat-log {
+  max-height: 14rem;
+  overflow-y: auto;
+  margin-bottom: 0.5rem;
+  font-size: 0.875rem;
+}
+.room-chat-line {
+  margin-bottom: 0.35rem;
+  word-break: break-word;
+}
+.room-chat-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.room-chat-input {
+  resize: vertical;
+  min-height: 2.5rem;
+}
+.room-chat-meta {
+  font-size: 0.75rem;
+}
+.events-pre {
+  max-height: 10rem;
+  overflow: auto;
+  font-size: 0.75rem;
+  margin: 0;
 }
 </style>

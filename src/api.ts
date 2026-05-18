@@ -5,8 +5,10 @@ import type {
   JoinRoomResult,
   PlaybackAction,
   PlaybackMode,
+  PostRoomChatResponse,
   RegisterCodeResponse,
   Room,
+  RoomChatListResponse,
   RoomSnapshotPayload,
   RoomSocketMessage,
   RoomState,
@@ -209,6 +211,42 @@ export function fetchRoomSnapshot(token: string, roomId: string, password?: stri
   }
   return apiFetch<RoomSnapshotPayload>(
     `/api/rooms/${roomId}/snapshot`,
+    {
+      method: 'POST',
+      body: JSON.stringify(body),
+    },
+    token,
+  )
+}
+
+/** 与后端默认 `chat_max_text_runes` 对齐；发送前用于本地校验 */
+export const ROOM_CHAT_MAX_TEXT_RUNES = 2000
+
+export function fetchRoomChatHistory(
+  token: string,
+  roomId: string,
+  opts?: { beforeId?: string; limit?: number; password?: string },
+) {
+  const params = new URLSearchParams()
+  if (opts?.beforeId) params.set('before_id', opts.beforeId)
+  if (opts?.limit != null && opts.limit > 0) params.set('limit', String(opts.limit))
+  if (opts?.password) params.set('password', opts.password)
+  const q = params.toString()
+  const path = q ? `/api/rooms/${roomId}/chat?${q}` : `/api/rooms/${roomId}/chat`
+  return apiFetch<RoomChatListResponse>(path, {}, token)
+}
+
+export function postRoomChat(
+  token: string,
+  roomId: string,
+  input: { text: string; password?: string },
+) {
+  const body: Record<string, string> = { text: input.text }
+  if (input.password !== undefined && input.password !== '') {
+    body.password = input.password
+  }
+  return apiFetch<PostRoomChatResponse>(
+    `/api/rooms/${roomId}/chat`,
     {
       method: 'POST',
       body: JSON.stringify(body),
