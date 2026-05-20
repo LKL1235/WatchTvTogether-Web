@@ -28,6 +28,7 @@ import type {
   PlaybackAction,
   PlaybackMode,
   Room,
+  RoomChatMessage,
   RoomPresenceMember,
   RoomSnapshotPayload,
   RoomState,
@@ -38,6 +39,11 @@ import AppButton from '../components/ui/AppButton.vue'
 import AppCard from '../components/ui/AppCard.vue'
 import AppModal from '../components/ui/AppModal.vue'
 import AppInput from '../components/ui/AppInput.vue'
+import RoomChatPanel from '../components/room/RoomChatPanel.vue'
+import RoomChatResizer from '../components/room/RoomChatResizer.vue'
+import RoomChatSheet from '../components/room/RoomChatSheet.vue'
+import RoomToolsDrawer from '../components/room/RoomToolsDrawer.vue'
+import { useRoomChatPanelLayout } from '../composables/useRoomChatPanelLayout'
 import { useRoute } from 'vue-router'
 
 const props = defineProps<{
@@ -205,6 +211,9 @@ async function sendChatMessage() {
       rtChatMessages.value = [m, ...rtChatMessages.value].slice(0, 200)
     }
     chatDraft.value = ''
+    await nextTick()
+    desktopChatPanelRef.value?.afterSendFocus()
+    mobileChatPanelRef.value?.afterSendFocus()
     if (res.realtime === 'deferred') {
       showRoomActivity('消息已保存，实时推送可能略有延迟')
     }
@@ -410,7 +419,49 @@ const playbackUrl = computed(() => {
 })
 
 const roomLoadError = ref('')
-const sidebarOpen = ref(false)
+const toolsDrawerOpen = ref(false)
+const chatSheetOpen = ref(false)
+const desktopChatPanelRef = ref<InstanceType<typeof RoomChatPanel> | null>(null)
+const mobileChatPanelRef = ref<InstanceType<typeof RoomChatPanel> | null>(null)
+
+const {
+  width: chatPanelWidth,
+  collapsed: chatPanelCollapsed,
+  showDesktopChat,
+  chatPanelStyle,
+  maxChatWidth,
+  toggleCollapsed: toggleChatPanelCollapsed,
+  resetWidth: resetChatPanelWidth,
+  onResizePointerDown,
+  onResizePointerMove,
+  endResize: onResizePointerEnd,
+  onResizerKeydown,
+} = useRoomChatPanelLayout()
+
+const chatMinWidth = 280
+
+function openToolsDrawer() {
+  toolsDrawerOpen.value = true
+  chatSheetOpen.value = false
+}
+
+function openChatSheet() {
+  chatSheetOpen.value = true
+  toolsDrawerOpen.value = false
+}
+
+function closeToolsDrawer() {
+  toolsDrawerOpen.value = false
+}
+
+function closeChatSheet() {
+  chatSheetOpen.value = false
+}
+
+function displayNameForChat(user: RoomChatMessage['user']) {
+  return displayNameForUser(user)
+}
+
 const controlError = ref('')
 const eventPreview = computed(() =>
   rtEvents.value.slice(0, 5).map((e) => JSON.stringify(e, null, 0)).join('\n'),
@@ -1219,10 +1270,6 @@ function reconnectRealtime() {
   connectRealtime()
 }
 
-function closeSidebar() {
-  sidebarOpen.value = false
-}
-
 function toggleViewerMute() {
   const v = videoElement.value
   if (!v) return
@@ -1252,8 +1299,8 @@ function setViewerVolume(e: Event) {
     </AppCard>
   </section>
 
-  <section v-else class="room-layout">
-    <div class="room-main">
+  <section v-else class="room-layout" :style="chatPanelStyle">
+    <div class="room-stage">
       <AppCard padding="compact">
         <div class="room-title-row">
           <h2 class="room-title">{{ room.name }}</h2>
@@ -1395,131 +1442,121 @@ function setViewerVolume(e: Event) {
         <p v-else class="hint">房主可使用下方控制条与进度条；队列变更会立即提交到服务端。</p>
       </AppCard>
 
-      <div class="room-sidebar-toggle">
-        <AppButton variant="primary" @click="sidebarOpen = true">队列与成员</AppButton>
+      <div class="room-stage-actions">
+        <AppButton variant="primary" type="button" @click="openChatSheet">聊天</AppButton>
+        <AppButton variant="secondary" type="button" @click="openToolsDrawer">队列与成员</AppButton>
+      </div>
+      <div class="room-stage-actions room-stage-actions--desktop">
+        <AppButton variant="secondary" type="button" @click="openToolsDrawer">队列与成员</AppButton>
       </div>
     </div>
 
-    <div class="room-drawer-backdrop" :class="{ 'is-visible': sidebarOpen }" @click="closeSidebar" />
-    <aside class="room-sidebar" :class="{ 'is-open': sidebarOpen }">
-      <div style="display: flex; justify-content: space-between; align-items: center; gap: 0.5rem">
-        <h3 class="sidebar-heading" style="border: 0; padding: 0; margin: 0">侧栏</h3>
-        <AppButton class="room-sidebar-close" variant="ghost" size="sm" @click="closeSidebar">关闭</AppButton>
-      </div>
-
-      <AppCard padding="compact">
-        <h3 class="sidebar-heading">视频队列</h3>
-        <p v-if="queueSyncPending" class="muted" role="status">正在同步队列到服务端…</p>
-        <div class="playback-mode-row">
-          <label class="playback-mode-label">
-            播放模式
-            <select class="ui-input" :value="playbackMode" :disabled="!canControl" @change="onPlaybackModeChange">
-              <option value="sequential">顺序 — 最后一首结束后停止</option>
-              <option value="loop">循环 — 最后一首后回到第一首</option>
-            </select>
-          </label>
-          <AppButton v-if="canControl" size="sm" variant="secondary" type="button" @click="ownerNextTrack">下一首</AppButton>
-        </div>
-        <form class="inline-form inline-form--stack" @submit.prevent="addManualUrl">
-          <input v-model="manualUrl" class="ui-input" placeholder="添加 mp4 / m3u8 URL" :disabled="!canControl" />
-          <input
-            v-model="manualUrlTitle"
-            class="ui-input"
-            placeholder="显示名称（可选）"
-            :disabled="!canControl"
-          />
-          <AppButton type="submit" size="sm" :disabled="!canControl">添加</AppButton>
-        </form>
-        <p v-if="!canControl" class="muted queue-owner-hint">队列由房主管理；你可查看顺序与当前条目。</p>
-        <div class="queue-item" v-for="(item, index) in queue" :key="item.id">
-          <div class="queue-item__text">
-            <strong :title="item.file_url || item.file_path || item.id">{{ displayTitleForQueueItem(item) }}</strong>
-            <small class="queue-url-line" :title="item.file_url || item.file_path">{{ item.file_url || item.file_path }}</small>
-          </div>
-          <div class="queue-actions">
-            <AppButton
-              v-if="canControl"
-              size="sm"
-              variant="secondary"
-              :disabled="index === 0"
-              @click="moveQueue(index, -1)"
-            >
-              上移
-            </AppButton>
-            <AppButton
-              v-if="canControl"
-              size="sm"
-              variant="secondary"
-              :disabled="index === queue.length - 1"
-              @click="moveQueue(index, 1)"
-            >
-              下移
-            </AppButton>
-            <AppButton v-if="canControl" size="sm" :disabled="!canControl" @click="switchToQueueItem(item)">切换</AppButton>
-            <AppButton v-if="canControl" size="sm" variant="secondary" @click="openQueueRename(item)">改名</AppButton>
-            <AppButton v-if="canControl" size="sm" variant="danger" :disabled="!canControl" @click="removeQueue(index)">删除</AppButton>
-          </div>
-        </div>
-      </AppCard>
-
-      <AppCard padding="compact">
-        <h3 class="sidebar-heading">聊天</h3>
-        <p v-if="chatBanner" class="muted" role="status">{{ chatBanner }}</p>
-        <p v-if="chatLoading" class="muted">加载聊天记录…</p>
-        <div v-else class="room-chat-log" role="log" aria-live="polite">
-          <p v-if="!chatListAsc.length" class="muted">暂无消息</p>
-          <div v-for="m in chatListAsc" :key="m.stream_id || m.seq" class="room-chat-line">
-            <strong>{{ displayNameForUser(m.user) }}</strong>
-            <span class="muted"> · </span>
-            <span>{{ m.text }}</span>
-          </div>
-        </div>
-        <form class="room-chat-form" @submit.prevent="sendChatMessage">
-          <textarea
-            v-model="chatDraft"
-            class="ui-input room-chat-input"
-            rows="2"
-            :disabled="chatSending || chatBlocked"
-            :placeholder="chatBlocked ? '聊天暂不可用' : '发送消息…'"
-            maxlength="8000"
-          />
-          <div class="room-chat-meta muted">
-            {{ countChatRunes(chatDraft) }} / {{ ROOM_CHAT_MAX_TEXT_RUNES }}
-          </div>
-          <p v-if="chatSendError" class="error" role="alert">{{ chatSendError }}</p>
-          <AppButton type="submit" size="sm" :disabled="chatSending || chatBlocked || !chatDraft.trim()">
-            发送
-          </AppButton>
-        </form>
-      </AppCard>
-
-      <AppCard padding="compact">
-        <h3 class="sidebar-heading">在线成员（Ably Presence）</h3>
-        <div class="member" v-for="member in members" :key="member.connectionId || member.id">
-          <span class="avatar">{{ displayNameForUser(member).slice(0, 1).toUpperCase() }}</span>
-          <span>
-            {{ displayNameForUser(member) }}
-            <small class="muted">@{{ member.username }}</small>
-            <small v-if="member.is_owner" class="muted">房主</small>
-            <small v-else-if="member.role === 'admin'" class="muted">管理员</small>
-          </span>
-          <AppButton
-            v-if="canControl && member.id !== currentUser?.id"
-            size="sm"
-            variant="danger"
-            @click="kick(member)"
+    <template v-if="showDesktopChat">
+      <RoomChatResizer
+        :width="chatPanelWidth"
+        :min-width="chatMinWidth"
+        :max-width="maxChatWidth"
+        :collapsed="chatPanelCollapsed"
+        @pointerdown="onResizePointerDown"
+        @pointermove="onResizePointerMove"
+        @pointerup="onResizePointerEnd"
+        @pointercancel="onResizePointerEnd"
+        @dblclick="resetChatPanelWidth"
+        @keydown="onResizerKeydown"
+      />
+      <aside
+        class="room-chat-panel"
+        :class="{ 'is-collapsed': chatPanelCollapsed }"
+        aria-label="房间聊天"
+      >
+        <div v-if="chatPanelCollapsed" class="room-chat-collapsed-strip">
+          <button
+            type="button"
+            class="room-chat-collapsed-strip__btn"
+            aria-expanded="false"
+            @click="toggleChatPanelCollapsed"
           >
-            踢出
-          </AppButton>
+            展开聊天
+          </button>
         </div>
-        <p v-if="!members.length" class="muted">暂无 presence 成员（连接建立后将显示）</p>
-      </AppCard>
+        <template v-else>
+          <header class="room-chat-panel__header">
+            <h3 class="room-chat-panel__title">聊天</h3>
+            <AppButton
+              variant="ghost"
+              size="sm"
+              type="button"
+              aria-expanded="true"
+              @click="toggleChatPanelCollapsed"
+            >
+              收起
+            </AppButton>
+          </header>
+          <div class="room-chat-panel__body">
+            <RoomChatPanel
+              ref="desktopChatPanelRef"
+              :messages="chatListAsc"
+              :loading="chatLoading"
+              :banner="chatBanner"
+              :blocked="chatBlocked"
+              :sending="chatSending"
+              :send-error="chatSendError"
+              :draft="chatDraft"
+              :display-name="displayNameForChat"
+              :count-runes="countChatRunes"
+              @update:draft="chatDraft = $event"
+              @send="sendChatMessage"
+            />
+          </div>
+        </template>
+      </aside>
+    </template>
 
-      <AppCard v-if="isDev" padding="compact">
-        <h3 class="sidebar-heading">实时事件（开发）</h3>
-        <pre class="events-pre">{{ eventPreview || '—' }}</pre>
-      </AppCard>
-    </aside>
+    <RoomToolsDrawer
+      :open="toolsDrawerOpen"
+      :queue="queue"
+      :members="members"
+      :playback-mode="playbackMode"
+      :can-control="canControl"
+      :queue-sync-pending="queueSyncPending"
+      :manual-url="manualUrl"
+      :manual-url-title="manualUrlTitle"
+      :is-dev="isDev"
+      :event-preview="eventPreview"
+      :current-user-id="currentUser?.id"
+      :display-title="displayTitleForQueueItem"
+      :display-name="displayNameForUser"
+      @close="closeToolsDrawer"
+      @update:manual-url="manualUrl = $event"
+      @update:manual-url-title="manualUrlTitle = $event"
+      @playback-mode-change="onPlaybackModeChange"
+      @owner-next-track="ownerNextTrack"
+      @add-manual-url="addManualUrl"
+      @move-queue="moveQueue"
+      @switch-queue-item="switchToQueueItem"
+      @open-queue-rename="openQueueRename"
+      @remove-queue="removeQueue"
+      @kick="kick"
+    />
+
+    <RoomChatSheet :open="chatSheetOpen" @close="closeChatSheet">
+      <RoomChatPanel
+        ref="mobileChatPanelRef"
+        embedded
+        :messages="chatListAsc"
+        :loading="chatLoading"
+        :banner="chatBanner"
+        :blocked="chatBlocked"
+        :sending="chatSending"
+        :send-error="chatSendError"
+        :draft="chatDraft"
+        :display-name="displayNameForChat"
+        :count-runes="countChatRunes"
+        @update:draft="chatDraft = $event"
+        @send="sendChatMessage"
+      />
+    </RoomChatSheet>
+
 
     <AppModal v-model="shareModalOpen" title="分享房间">
       <p class="muted" style="margin-top: 0">
@@ -1870,38 +1907,5 @@ function setViewerVolume(e: Event) {
   flex-direction: column;
   gap: 0.25rem;
   font-size: 0.875rem;
-}
-@media (min-width: 961px) {
-  .room-sidebar-close {
-    display: none;
-  }
-}
-.room-chat-log {
-  max-height: 14rem;
-  overflow-y: auto;
-  margin-bottom: 0.5rem;
-  font-size: 0.875rem;
-}
-.room-chat-line {
-  margin-bottom: 0.35rem;
-  word-break: break-word;
-}
-.room-chat-form {
-  display: flex;
-  flex-direction: column;
-  gap: 0.35rem;
-}
-.room-chat-input {
-  resize: vertical;
-  min-height: 2.5rem;
-}
-.room-chat-meta {
-  font-size: 0.75rem;
-}
-.events-pre {
-  max-height: 10rem;
-  overflow: auto;
-  font-size: 0.75rem;
-  margin: 0;
 }
 </style>
