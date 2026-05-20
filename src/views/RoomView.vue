@@ -39,6 +39,7 @@ import AppButton from '../components/ui/AppButton.vue'
 import AppCard from '../components/ui/AppCard.vue'
 import AppModal from '../components/ui/AppModal.vue'
 import AppInput from '../components/ui/AppInput.vue'
+import RoomChatMembersBlock from '../components/room/RoomChatMembersBlock.vue'
 import RoomChatPanel from '../components/room/RoomChatPanel.vue'
 import RoomChatResizer from '../components/room/RoomChatResizer.vue'
 import RoomChatSheet from '../components/room/RoomChatSheet.vue'
@@ -1444,10 +1445,10 @@ function setViewerVolume(e: Event) {
 
       <div class="room-stage-actions">
         <AppButton variant="primary" type="button" @click="openChatSheet">聊天</AppButton>
-        <AppButton variant="secondary" type="button" @click="openToolsDrawer">队列与成员</AppButton>
+        <AppButton variant="secondary" type="button" @click="openToolsDrawer">队列</AppButton>
       </div>
       <div class="room-stage-actions room-stage-actions--desktop">
-        <AppButton variant="secondary" type="button" @click="openToolsDrawer">队列与成员</AppButton>
+        <AppButton variant="secondary" type="button" @click="openToolsDrawer">队列</AppButton>
       </div>
     </div>
 
@@ -1472,25 +1473,49 @@ function setViewerVolume(e: Event) {
         <div v-if="chatPanelCollapsed" class="room-chat-collapsed-strip">
           <button
             type="button"
-            class="room-chat-collapsed-strip__btn"
+            class="room-chat-icon-btn room-chat-collapsed-strip__btn"
+            aria-label="展开聊天"
             aria-expanded="false"
             @click="toggleChatPanelCollapsed"
           >
-            展开聊天
+            <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+              <path
+                d="M11 5L6 9L11 13"
+                stroke="currentColor"
+                stroke-width="1.75"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
           </button>
         </div>
         <template v-else>
+          <RoomChatMembersBlock
+            :members="members"
+            :can-control="canControl"
+            :current-user-id="currentUser?.id"
+            :display-name="displayNameForUser"
+            @kick="kick"
+          />
           <header class="room-chat-panel__header">
             <h3 class="room-chat-panel__title">聊天</h3>
-            <AppButton
-              variant="ghost"
-              size="sm"
+            <button
               type="button"
+              class="room-chat-icon-btn"
+              aria-label="收起聊天"
               aria-expanded="true"
               @click="toggleChatPanelCollapsed"
             >
-              收起
-            </AppButton>
+              <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+                <path
+                  d="M7 5L12 9L7 13"
+                  stroke="currentColor"
+                  stroke-width="1.75"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+              </svg>
+            </button>
           </header>
           <div class="room-chat-panel__body">
             <RoomChatPanel
@@ -1515,7 +1540,6 @@ function setViewerVolume(e: Event) {
     <RoomToolsDrawer
       :open="toolsDrawerOpen"
       :queue="queue"
-      :members="members"
       :playback-mode="playbackMode"
       :can-control="canControl"
       :queue-sync-pending="queueSyncPending"
@@ -1523,9 +1547,7 @@ function setViewerVolume(e: Event) {
       :manual-url-title="manualUrlTitle"
       :is-dev="isDev"
       :event-preview="eventPreview"
-      :current-user-id="currentUser?.id"
       :display-title="displayTitleForQueueItem"
-      :display-name="displayNameForUser"
       @close="closeToolsDrawer"
       @update:manual-url="manualUrl = $event"
       @update:manual-url-title="manualUrlTitle = $event"
@@ -1536,13 +1558,20 @@ function setViewerVolume(e: Event) {
       @switch-queue-item="switchToQueueItem"
       @open-queue-rename="openQueueRename"
       @remove-queue="removeQueue"
-      @kick="kick"
     />
 
     <RoomChatSheet :open="chatSheetOpen" @close="closeChatSheet">
-      <RoomChatPanel
-        ref="mobileChatPanelRef"
-        embedded
+      <div class="room-chat-sheet-stack">
+        <RoomChatMembersBlock
+          :members="members"
+          :can-control="canControl"
+          :current-user-id="currentUser?.id"
+          :display-name="displayNameForUser"
+          @kick="kick"
+        />
+        <RoomChatPanel
+          ref="mobileChatPanelRef"
+          embedded
         :messages="chatListAsc"
         :loading="chatLoading"
         :banner="chatBanner"
@@ -1552,9 +1581,10 @@ function setViewerVolume(e: Event) {
         :draft="chatDraft"
         :display-name="displayNameForChat"
         :count-runes="countChatRunes"
-        @update:draft="chatDraft = $event"
-        @send="sendChatMessage"
-      />
+          @update:draft="chatDraft = $event"
+          @send="sendChatMessage"
+        />
+      </div>
     </RoomChatSheet>
 
 

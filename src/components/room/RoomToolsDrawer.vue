@@ -1,13 +1,12 @@
 <script setup lang="ts">
 import { nextTick, ref, watch } from 'vue'
-import type { PlaybackMode, RoomPresenceMember, Video } from '../../types'
+import type { PlaybackMode, Video } from '../../types'
 import AppButton from '../ui/AppButton.vue'
 import AppCard from '../ui/AppCard.vue'
 
 const props = defineProps<{
   open: boolean
   queue: Video[]
-  members: RoomPresenceMember[]
   playbackMode: PlaybackMode
   canControl: boolean
   queueSyncPending: boolean
@@ -15,9 +14,7 @@ const props = defineProps<{
   manualUrlTitle: string
   isDev: boolean
   eventPreview: string
-  currentUserId?: string
   displayTitle: (item: Video) => string
-  displayName: (member: RoomPresenceMember) => string
 }>()
 
 const emit = defineEmits<{
@@ -31,7 +28,6 @@ const emit = defineEmits<{
   'switch-queue-item': [item: Video]
   'open-queue-rename': [item: Video]
   'remove-queue': [index: number]
-  kick: [member: RoomPresenceMember]
 }>()
 
 /** Keep drawer mounted during close transition (v-if + is-open on same tick skips CSS transition). */
@@ -73,12 +69,12 @@ function onKeydown(ev: KeyboardEvent) {
         :class="{ 'is-open': panelOpen }"
         role="dialog"
         aria-modal="true"
-        aria-label="队列与成员"
+        aria-label="视频队列"
         @keydown="onKeydown"
         @transitionend="onDrawerTransitionEnd"
       >
         <div class="room-tools-drawer__head">
-          <h3 class="room-tools-drawer__title">队列与成员</h3>
+          <h3 class="room-tools-drawer__title">视频队列</h3>
           <AppButton variant="ghost" size="sm" type="button" @click="emit('close')">关闭</AppButton>
         </div>
 
@@ -180,28 +176,6 @@ function onKeydown(ev: KeyboardEvent) {
                 </AppButton>
               </div>
             </div>
-          </AppCard>
-
-          <AppCard padding="compact">
-            <h3 class="sidebar-heading">在线成员（Ably Presence）</h3>
-            <div v-for="member in members" :key="member.connectionId || member.id" class="member">
-              <span class="avatar">{{ displayName(member).slice(0, 1).toUpperCase() }}</span>
-              <span>
-                {{ displayName(member) }}
-                <small class="muted">@{{ member.username }}</small>
-                <small v-if="member.is_owner" class="muted">房主</small>
-                <small v-else-if="member.role === 'admin'" class="muted">管理员</small>
-              </span>
-              <AppButton
-                v-if="canControl && member.id !== currentUserId"
-                size="sm"
-                variant="danger"
-                @click="emit('kick', member)"
-              >
-                踢出
-              </AppButton>
-            </div>
-            <p v-if="!members.length" class="muted">暂无 presence 成员（连接建立后将显示）</p>
           </AppCard>
 
           <AppCard v-if="isDev" padding="compact">
