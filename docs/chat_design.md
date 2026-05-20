@@ -340,6 +340,8 @@ docs/
 
 实现阶段 **禁止** 修改 `api.ts` 聊天接口签名及 `useRoomRealtime` 事件名，除非发现阻塞性 bug。
 
+后端契约与验收见同仓库 `docs/chat_design_backend_alignment_zh.md` 及 **WatchTvTogether** 仓库 `docs/room_chat_realtime_design_zh.md`（**无需**为侧栏 UI 新增后端接口）。
+
 ---
 
 ## 12. 风险与缓解
