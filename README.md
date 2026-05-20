@@ -47,8 +47,8 @@ WatchTvTogether 的 Vue 3 前端项目，用于实现「一起看电视/电影�
    - 同步控制：房主通过 `POST /api/rooms/:roomId/control` 提交全局播放、暂停、进度与切视频；普通成员不提交全局控制。
    - 队列管理：手动 URL（可选显示名称）、上移下移、删除、切换；队列展示名可在本机编辑（跨成员持久名需后端字段）。
    - 分享：`/room/:roomId` 深链，私有房可在查询参数中带 `password`（登录后加入）；分享弹窗可复制链接。
-   - 在线成员（Ably Presence）与踢人（房主/管理员）。
-   - **聊天**：侧栏加载 `GET /api/rooms/:roomId/chat` 历史；发送 `POST /api/rooms/:roomId/chat`；实时增量由 Ably 同频道 `room.chat` 推送（后端需 Redis；否则 503，前端提示聊天暂不可用）。超长返回 413，限流 429。
+   - **聊天**（桌面右侧可折叠列 / 移动底部 Sheet）：加载 `GET /api/rooms/:roomId/chat` 历史；发送 `POST /api/rooms/:roomId/chat`；实时增量由 Ably `room.chat` 推送。聊天区顶部为**在线成员**（Ably Presence，可折叠；列表固定高度滚动），房主/管理员可踢人。
+   - **视频队列**：独立工具抽屉（舞台区「队列」按钮）；不含聊天。
    - 开发模式下展示最近实时消息与连接状态。
 
 4. **管理员后台页（AdminView）**

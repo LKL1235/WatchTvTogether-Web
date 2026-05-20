@@ -180,6 +180,15 @@ onUnmounted(() => {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  padding: 0.75rem 1rem 1rem;
+  padding: 0 0 1rem;
+  overflow: hidden;
+}
+
+.room-chat-sheet__body :deep(.room-chat-members) {
+  flex-shrink: 0;
+}
+
+.room-chat-sheet__body :deep(.room-chat-panel-inner) {
+  padding: 0.5rem 1rem 0;
 }
 </style>
