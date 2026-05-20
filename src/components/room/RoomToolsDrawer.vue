@@ -1,9 +1,10 @@
 <script setup lang="ts">
+import { nextTick, ref, watch } from 'vue'
 import type { PlaybackMode, RoomPresenceMember, Video } from '../../types'
 import AppButton from '../ui/AppButton.vue'
 import AppCard from '../ui/AppCard.vue'
 
-defineProps<{
+const props = defineProps<{
   open: boolean
   queue: Video[]
   members: RoomPresenceMember[]
@@ -33,6 +34,31 @@ const emit = defineEmits<{
   kick: [member: RoomPresenceMember]
 }>()
 
+/** Keep drawer mounted during close transition (v-if + is-open on same tick skips CSS transition). */
+const rendered = ref(false)
+const panelOpen = ref(false)
+
+watch(
+  () => props.open,
+  async (open) => {
+    if (open) {
+      rendered.value = true
+      await nextTick()
+      panelOpen.value = true
+    } else {
+      panelOpen.value = false
+    }
+  },
+  { immediate: true },
+)
+
+function onDrawerTransitionEnd(ev: TransitionEvent) {
+  if (ev.target !== ev.currentTarget || ev.propertyName !== 'transform') return
+  if (!panelOpen.value && !props.open) {
+    rendered.value = false
+  }
+}
+
 function onKeydown(ev: KeyboardEvent) {
   if (ev.key === 'Escape') emit('close')
 }
@@ -40,15 +66,16 @@ function onKeydown(ev: KeyboardEvent) {
 
 <template>
   <Teleport to="body">
-    <div v-if="open" class="room-tools-root" role="presentation">
+    <div v-if="rendered" class="room-tools-root" role="presentation">
       <div class="room-tools-backdrop" @click="emit('close')" />
       <aside
         class="room-tools-drawer"
-        :class="{ 'is-open': open }"
+        :class="{ 'is-open': panelOpen }"
         role="dialog"
         aria-modal="true"
         aria-label="队列与成员"
         @keydown="onKeydown"
+        @transitionend="onDrawerTransitionEnd"
       >
         <div class="room-tools-drawer__head">
           <h3 class="room-tools-drawer__title">队列与成员</h3>

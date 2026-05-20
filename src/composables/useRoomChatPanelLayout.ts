@@ -98,11 +98,14 @@ export function useRoomChatPanelLayout() {
 
   function endResize(ev: PointerEvent) {
     if (!isResizing.value) return
-    isResizing.value = false
+    const delta = resizeStartX - ev.clientX
+    const finalWidth = clampChatWidth(resizeStartWidth + delta)
     if (resizeRaf) {
       cancelAnimationFrame(resizeRaf)
       resizeRaf = 0
     }
+    width.value = finalWidth
+    isResizing.value = false
     document.body.style.userSelect = ''
     const target = ev.currentTarget as HTMLElement
     if (target.hasPointerCapture?.(ev.pointerId)) {

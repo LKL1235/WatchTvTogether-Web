@@ -45,13 +45,6 @@ const { logRef, showNewMessages, onLogScroll, jumpToLatest, scrollToBottom } = u
   loadingRef,
 )
 
-watch(
-  () => props.loading,
-  async (now, was) => {
-    if (was && !now) await nextTick(() => scrollToBottom())
-  },
-)
-
 function onDraftInput(ev: Event) {
   emit('update:draft', (ev.target as HTMLTextAreaElement).value)
 }
