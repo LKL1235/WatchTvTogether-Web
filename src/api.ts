@@ -14,7 +14,6 @@ import type {
   RoomSocketMessage,
   RoomState,
   User,
-  Video,
 } from './types'
 import { normalizeAdminRoomItem } from './utils/adminRoom'
 
@@ -193,6 +192,7 @@ export function sendRoomControl(
     queue?: string[]
     playback_mode?: PlaybackMode
     control_version?: number
+    video_duration?: number
   },
 ) {
   return apiFetch<RoomSocketMessage>(
@@ -271,27 +271,6 @@ export async function fetchAdminRooms(token: string) {
     items: res.items.map(normalizeAdminRoomItem),
     total: res.total,
   }
-}
-
-export function fetchVideo(token: string, id: string) {
-  return apiFetch<Video>(`/api/videos/${encodeURIComponent(id)}`, {}, token)
-}
-
-export function fetchVideos(token: string, opts: string | { query?: string; status?: string } = '') {
-  const query = typeof opts === 'string' ? opts : (opts.query ?? '')
-  const status = typeof opts === 'string' ? 'ready' : (opts.status ?? 'ready')
-  const params = new URLSearchParams({ limit: '50' })
-  if (status) {
-    params.set('status', status)
-  }
-  if (query.trim()) {
-    params.set('q', query.trim())
-  }
-  return apiFetch<{ items: Video[]; total: number }>(`/api/videos?${params}`, {}, token)
-}
-
-export function deleteVideo(token: string, id: string) {
-  return apiFetch<void>(`/api/admin/videos/${id}`, { method: 'DELETE' }, token)
 }
 
 export function kickRoomMember(token: string, roomId: string, userId: string) {

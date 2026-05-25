@@ -7,7 +7,6 @@ import {
   fetchRoomChatHistory,
   fetchRoomSnapshot,
   fetchRoomState,
-  fetchVideo,
   kickRoomMember,
   postRoomChat,
   ROOM_CHAT_MAX_TEXT_RUNES,
@@ -21,6 +20,7 @@ import {
   advancePlayPositionSinceServerUpdatedAt,
   refineRoomStateWithProjection,
 } from '../utils/roomStateProjection'
+import { isPlaybackUrl } from '../utils/queueUrl'
 import { waitForVideoReady } from '../utils/waitForVideo'
 import { displayNameForUser } from '../utils/userDisplay'
 import { clampDisplayTitle, shortTitleFromUrl } from '../utils/queueDisplay'
@@ -395,23 +395,11 @@ watch(shareModalOpen, (open) => {
   if (!open) shareCopyFeedback.value = ''
 })
 
-/** 与 Vercel 无本机文件场景对齐：优先外链 / `source_url`，其次 `/api/...` 相对路径 */
+/** 队列项 id 即外链播放地址 */
 function resolveVideoPlaybackUrl(video: Video): string {
-  const direct = video.file_url?.trim() || video.source_url?.trim()
-  if (direct) {
-    if (direct.startsWith('http://') || direct.startsWith('https://') || direct.startsWith('//')) {
-      return direct
-    }
-    if (direct.startsWith('/')) return `${API_BASE}${direct}`
-    return direct
-  }
-  const rel = video.file_path?.trim()
-  if (rel) {
-    if (rel.startsWith('http://') || rel.startsWith('https://') || rel.startsWith('//')) return rel
-    if (rel.startsWith('/')) return `${API_BASE}${rel}`
-    return `${API_BASE}/${rel.replace(/^\//, '')}`
-  }
-  return `${API_BASE}/api/videos/${encodeURIComponent(video.id)}/file`
+  const url = video.file_url?.trim() || video.id?.trim()
+  if (!url || !isPlaybackUrl(url)) return ''
+  return url
 }
 
 const playbackUrl = computed(() => {
@@ -472,7 +460,7 @@ const isDev = import.meta.env.DEV
 const queueSyncPending = computed(() => pendingQueueSubmit.value > 0)
 
 function isLikelyUrlQueueId(id: string) {
-  return /^https?:\/\//i.test(id) || id.startsWith('//')
+  return isPlaybackUrl(id)
 }
 
 function isSnapshotPayload(p: unknown): p is RoomSnapshotPayload {
@@ -482,45 +470,25 @@ function isSnapshotPayload(p: unknown): p is RoomSnapshotPayload {
   return typeof o.room_id === 'string' && (q == null || Array.isArray(q))
 }
 
-async function videoFromQueueId(id: string, token: string): Promise<Video | null> {
-  if (isLikelyUrlQueueId(id)) {
-    const custom = queueDisplayTitles.value.get(id)?.trim()
-    const defaultTitle = shortTitleFromUrl(id)
-    return {
-      id,
-      title: custom ? clampDisplayTitle(custom) : defaultTitle,
-      file_path: id,
-      file_url: id,
-      duration: 0,
-      format: id.split('.').pop() || '',
-      size: 0,
-      status: 'ready',
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    }
-  }
-  try {
-    const v = await fetchVideo(token, id)
-    return v
-  } catch {
-    return {
-      id,
-      title: `未知视频 (${id.slice(0, 8)}…)`,
-      file_path: `/api/videos/${encodeURIComponent(id)}/file`,
-      duration: 0,
-      format: '',
-      size: 0,
-      status: 'ready',
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    }
+function videoFromQueueId(id: string): Video | null {
+  if (!isLikelyUrlQueueId(id)) return null
+  const custom = queueDisplayTitles.value.get(id)?.trim()
+  const defaultTitle = shortTitleFromUrl(id)
+  return {
+    id,
+    title: custom ? clampDisplayTitle(custom) : defaultTitle,
+    file_url: id,
+    duration: 0,
+    format: id.split('.').pop() || '',
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
   }
 }
 
-async function buildQueueFromIds(ids: string[], token: string): Promise<Video[]> {
+function buildQueueFromIds(ids: string[]): Video[] {
   const out: Video[] = []
   for (const id of ids) {
-    const v = await videoFromQueueId(id, token)
+    const v = videoFromQueueId(id)
     if (v) out.push(v)
   }
   return out
@@ -591,6 +559,7 @@ async function submitOwnerControl(input: {
   video_id?: string
   queue?: string[]
   playback_mode?: PlaybackMode
+  video_duration?: number
 }): Promise<boolean> {
   if (!canControl.value) return false
   const previous = ownerControlLock
@@ -613,11 +582,16 @@ async function performOwnerControl(
     video_id?: string
     queue?: string[]
     playback_mode?: PlaybackMode
+    video_duration?: number
   },
   afterStaleRetry: boolean,
 ): Promise<boolean> {
   controlError.value = ''
   const queueIds = input.queue ?? queue.value.map((v) => v.id)
+  const dur =
+    input.video_duration != null && input.video_duration > 0
+      ? input.video_duration
+      : displayedDuration.value
   const body = {
     action: input.action!,
     position: input.position,
@@ -625,6 +599,7 @@ async function performOwnerControl(
     queue: queueIds,
     playback_mode: input.playback_mode ?? playbackMode.value,
     ...(serverControlVersion.value > 0 ? { control_version: serverControlVersion.value } : {}),
+    ...(dur > 0 ? { video_duration: dur } : {}),
   }
   try {
     const msg = await sendRoomControl(auth.accessToken.value, props.room.id, body)
@@ -717,13 +692,13 @@ async function applyRoomSnapshot(payload: RoomSnapshotPayload) {
   const fromState = Array.isArray(stateQ) ? stateQ : []
   const queueIds = topQueue.length ? topQueue : fromState
   if (queueIds.length) {
-    queue.value = await buildQueueFromIds(queueIds, auth.accessToken.value)
+    queue.value = buildQueueFromIds(queueIds)
     const ids = new Set(queue.value.map((v) => v.id))
     queueDisplayTitles.value = new Map(
       [...queueDisplayTitles.value].filter(([k]) => ids.has(k)),
     )
   } else if (!queueIds.length && payload.state?.video_id) {
-    queue.value = await buildQueueFromIds([payload.state.video_id], auth.accessToken.value)
+    queue.value = buildQueueFromIds([payload.state.video_id])
   }
   await nextTick()
   loadPlaybackSource()
@@ -791,7 +766,7 @@ watch(rtLastMessage, (message) => {
     applyStateFromSyncMessage(message)
     const q = message.queue
     if (q?.length) {
-      void buildQueueFromIds(q, auth.accessToken.value).then((built) => {
+      void Promise.resolve(buildQueueFromIds(q)).then((built) => {
         queue.value = built
       })
     }
@@ -839,6 +814,13 @@ function onVideoLoadedMetadata() {
   localVideoPaused.value = v?.paused ?? true
   viewerMuted.value = v?.muted ?? false
   viewerVolume.value = v?.volume ?? 1
+  if (canControl.value && videoDuration.value > 0) {
+    void submitOwnerControl({
+      action: state.value?.action === 'play' ? 'play' : 'pause',
+      position: getVideoTime(),
+      video_duration: videoDuration.value,
+    })
+  }
 }
 
 function onVideoTimeUpdate() {
@@ -1073,6 +1055,10 @@ function onVideoEnded() {
 async function addManualUrl() {
   if (!canControl.value || !manualUrl.value.trim()) return
   const url = manualUrl.value.trim()
+  if (!isPlaybackUrl(url)) {
+    controlError.value = '请粘贴 http(s) 或 // 开头的外链地址'
+    return
+  }
   const display = manualUrlTitle.value.trim() || shortTitleFromUrl(url)
   const nextTitles = new Map(queueDisplayTitles.value)
   nextTitles.set(url, display)
@@ -1080,12 +1066,9 @@ async function addManualUrl() {
   const stub: Video = {
     id: url,
     title: clampDisplayTitle(display),
-    file_path: url,
     file_url: url,
     duration: 0,
     format: url.split('.').pop() || '',
-    size: 0,
-    status: 'ready',
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
   }

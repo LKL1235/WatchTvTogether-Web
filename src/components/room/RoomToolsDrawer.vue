@@ -125,9 +125,9 @@ function onKeydown(ev: KeyboardEvent) {
             <p v-if="!canControl" class="muted queue-owner-hint">队列由房主管理；你可查看顺序与当前条目。</p>
             <div v-for="(item, index) in queue" :key="item.id" class="queue-item">
               <div class="queue-item__text">
-                <strong :title="item.file_url || item.file_path || item.id">{{ displayTitle(item) }}</strong>
-                <small class="queue-url-line" :title="item.file_url || item.file_path">{{
-                  item.file_url || item.file_path
+                <strong :title="item.file_url || item.id">{{ displayTitle(item) }}</strong>
+                <small class="queue-url-line" :title="item.file_url || item.id">{{
+                  item.file_url || item.id
                 }}</small>
               </div>
               <div class="queue-actions">

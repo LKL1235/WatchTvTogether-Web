@@ -163,18 +163,13 @@ export interface RoomSnapshotPayload {
   }
 }
 
+/** In-room queue item (id is the playback URL). */
 export interface Video {
   id: string
   title: string
-  /** 相对路径或遗留字段；优先使用 `file_url` / `source_url`（外链或签名 URL） */
-  file_path?: string
-  file_url?: string
-  poster_path?: string
-  duration: number
-  format: string
-  size: number
-  source_url?: string
-  status: 'processing' | 'ready' | 'error'
-  created_at: string
-  updated_at: string
+  file_url: string
+  duration?: number
+  format?: string
+  created_at?: string
+  updated_at?: string
 }
