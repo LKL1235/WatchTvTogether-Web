@@ -766,9 +766,7 @@ watch(rtLastMessage, (message) => {
     applyStateFromSyncMessage(message)
     const q = message.queue
     if (q?.length) {
-      void Promise.resolve(buildQueueFromIds(q)).then((built) => {
-        queue.value = built
-      })
+      queue.value = buildQueueFromIds(q)
     }
     return
   }
@@ -816,7 +814,7 @@ function onVideoLoadedMetadata() {
   viewerVolume.value = v?.volume ?? 1
   if (canControl.value && videoDuration.value > 0) {
     void submitOwnerControl({
-      action: state.value?.action === 'play' ? 'play' : 'pause',
+      action: roomActionImpliesPlayback(state.value?.action) ? 'play' : 'pause',
       position: getVideoTime(),
       video_duration: videoDuration.value,
     })
