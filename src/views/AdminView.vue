@@ -3,12 +3,12 @@ import { computed, onMounted, ref } from 'vue'
 import { closeRoom, deleteVideo, fetchAdminRooms, fetchVideos } from '../api'
 import { useAuthStore } from '../stores/auth'
 import { formatApiError } from '../utils/errors'
-import type { AdminRoomRow, Video } from '../types'
+import type { AdminRoomRow, Room, Video } from '../types'
 import AppButton from '../components/ui/AppButton.vue'
 import AppCard from '../components/ui/AppCard.vue'
 import AppEmpty from '../components/ui/AppEmpty.vue'
 
-const emit = defineEmits<{ 'open-room': [room: AdminRoomRow] }>()
+const emit = defineEmits<{ 'open-room': [room: Room] }>()
 const auth = useAuthStore()
 const videos = ref<Video[]>([])
 const rooms = ref<AdminRoomRow[]>([])
@@ -129,7 +129,9 @@ onMounted(async () => {
           <div>
             <strong>{{ room.name }}</strong>
             <small class="muted">
-              {{ room.visibility }} · 房主 {{ room.owner_id }} · 在线 {{ roomOnlineCount(room) }} ·
+              {{ room.visibility }} · 房主
+              {{ room.owner?.nickname || room.owner?.username || room.owner_id }} · 在线
+              {{ roomOnlineCount(room) }} ·
               {{ roomPlaybackLabel(room) }}
             </small>
           </div>
