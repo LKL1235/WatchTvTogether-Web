@@ -1,5 +1,6 @@
 import type {
   AblyJwtResponse,
+  AdminRoomListItem,
   AdminRoomRow,
   AuthTokens,
   JoinRoomResult,
@@ -15,6 +16,7 @@ import type {
   User,
   Video,
 } from './types'
+import { normalizeAdminRoomItem } from './utils/adminRoom'
 
 export const API_BASE = import.meta.env.VITE_API_BASE ?? 'https://watchtvtogether.bestlkl.top'
 
@@ -259,8 +261,16 @@ export function closeRoom(token: string, roomId: string) {
   return apiFetch<void>(`/api/rooms/${roomId}`, { method: 'DELETE' }, token)
 }
 
-export function fetchAdminRooms(token: string) {
-  return apiFetch<{ items: AdminRoomRow[]; total?: number }>('/api/admin/rooms', {}, token)
+export async function fetchAdminRooms(token: string) {
+  const res = await apiFetch<{ items: AdminRoomListItem[]; total?: number }>(
+    '/api/admin/rooms',
+    {},
+    token,
+  )
+  return {
+    items: res.items.map(normalizeAdminRoomItem),
+    total: res.total,
+  }
 }
 
 export function fetchVideo(token: string, id: string) {

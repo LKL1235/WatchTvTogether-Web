@@ -47,21 +47,25 @@ export type PlaybackMode = 'sequential' | 'loop'
 /** POST /api/rooms/:id/join 成功响应（含跨房自动迁移时的旧房间 ID） */
 export type JoinRoomResult = Room & { is_owner: boolean; left_room_id?: string }
 
-/** GET /api/admin/rooms 单条（字段以后端为准，其余为可选） */
-export interface AdminRoomRow {
-  id: string
-  name: string
-  owner_id: string
-  visibility: 'public' | 'private'
+/** GET /api/admin/rooms 原始单条（与后端 adminRoomListItem 一致） */
+export interface AdminRoomListItem {
+  room: Room
+  owner?: User
+  online_count: number
   current_video_id?: string
+  playback_action?: PlaybackAction
   created_at: string
-  updated_at: string
+}
+
+/** 管理端房间列表行（由 AdminRoomListItem 展平，供 UI 使用） */
+export interface AdminRoomRow extends Room {
   online_count?: number
   viewer_count?: number
   playback_action?: PlaybackAction
   action?: PlaybackAction
   position?: number
   is_playing?: boolean
+  owner?: User
 }
 
 export interface RoomState {
