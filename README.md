@@ -89,7 +89,7 @@ WatchTvTogether 的 Vue 3 前端项目，用于实现「一起看电视/电影�
 - `GET /api/videos?limit=50&status=...&q=...`：查询视频列表（条目的可播放地址优先取 `file_url` / `source_url` 等，与无本机存储的后端一致）
 - `DELETE /api/admin/videos/{id}`：删除视频
 
-**已移除**（Vercel 后端不再提供）：`GET/POST/DELETE /api/admin/downloads*`，以及依赖 `GET /api/capabilities` 中下载相关能力标志的前端逻辑。
+**已移除**（Vercel 后端不再提供）：`GET/POST/DELETE /api/admin/downloads*`、`GET /api/capabilities`，以及依赖能力标志的前端逻辑。
 
 ### 关于 CORS 与 cookie
 
