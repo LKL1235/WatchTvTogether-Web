@@ -7,12 +7,12 @@
 - **登录请使用邮箱**：登录页的「账号」字段请填写**注册时使用的邮箱**（而非用户名），可减少因用户名拼写、大小写不一致导致的登录失败。若尚未有账号，需先完成**邮箱验证码注册**流程。
 - **注册依赖邮箱**：注册会向邮箱发送验证码，请确保邮箱可收信；若收不到邮件，检查垃圾箱或稍后再试（后端可能对验证码请求有冷却与每日上限）。
 - **私有房间**：加入私有房需要密码；通过分享链接进入时，若 URL 带有 `?password=`，需在**已登录**状态下由路由传入密码；刷新页面后若链接仍带密码参数可再次生效。
-- **播放与网络**：影片为外链、HLS（m3u8）或签名 URL，实际能否播放取决于资源本身、跨域（CORS）与网络环境；若列表为空或无法播放，多为后端配置的片源或 API 地址（`VITE_API_BASE`）问题，而非本仓库单独可修复。
+- **播放与网络**：片源为房主在房间内添加的 **外链 URL**（mp4、m3u8 等），浏览器直接请求 CDN / 对象存储；能否播放取决于资源本身、CORS 与网络。若无法播放，检查 URL 是否可公开访问、是否允许跨域。
 - **实时同步**：房间内同步依赖 Ably 与后端签发的 JWT；若前后端域名变更，需在对应服务中核对允许的域名与密钥策略。
 
 ---
 
-WatchTvTogether 的 Vue 3 前端项目，用于实现「一起看电视/电影」的房间管理、同步播放和管理员后台。**后端（Go API）部署在 Vercel**：无持久磁盘、不提供服务端视频下载与本地入库（无 ffmpeg / yt-dlp 流水线）；影片来源以后端配置的 **外链 URL、HLS（m3u8）或对象存储签名 URL** 为准，与本前端通过 `GET /api/videos` 返回的 `file_url` / `source_url` 等字段对齐。
+WatchTvTogether 的 Vue 3 前端项目，用于实现「一起看电视/电影」的房间管理、同步播放和管理员后台。**后端（Go API）部署在 Vercel**：无持久磁盘、不提供服务端视频下载与本地入库（无 ffmpeg / yt-dlp 流水线）。**无全局影片库**——房主在房间内手动添加 **http(s) 或协议相对（`//`）播放 URL** 组成队列；同步状态与队列存于 Redis，由 Ably 推送。
 
 ## 环境变量
 
@@ -45,15 +45,16 @@ WatchTvTogether 的 Vue 3 前端项目，用于实现「一起看电视/电影�
 3. **房间页（RoomView）**
    - 视频播放区（支持 mp4 / m3u8）；房主自定义控制条（播放/暂停、进度、音量），普通成员仅本地播放/暂停与音量；画中画与远程播放入口已禁用。
    - 同步控制：房主通过 `POST /api/rooms/:roomId/control` 提交全局播放、暂停、进度与切视频；普通成员不提交全局控制。
-   - 队列管理：手动 URL（可选显示名称）、上移下移、删除、切换；队列展示名可在本机编辑（跨成员持久名需后端字段）。
+   - 队列管理：手动输入播放 URL（可选本机展示名）、上移下移、删除、切换；展示名仅存浏览器内存，跨成员同步的仍是 URL 列表。
    - 分享：`/room/:roomId` 深链，私有房可在查询参数中带 `password`（登录后加入）；分享弹窗可复制链接。
    - **聊天**（桌面右侧可折叠列 / 移动底部 Sheet）：加载 `GET /api/rooms/:roomId/chat` 历史；发送 `POST /api/rooms/:roomId/chat`；实时增量由 Ably `room.chat` 推送。聊天区顶部为**在线成员**（Ably Presence，可折叠；列表固定高度滚动），房主/管理员可踢人。
    - **视频队列**：独立工具抽屉（舞台区「队列」按钮）；不含聊天。
    - 开发模式下展示最近实时消息与连接状态。
 
 4. **管理员后台页（AdminView）**
-   - 视频库管理（查看、删除、刷新）；列表数据来自后端配置的远程影片元数据。
-   - 房间监控统计与当前房间信息。
+   - 房间监控：当前房间数、在线人数、播放状态、当前 URL。
+   - 管理员可关闭并删除房间（`DELETE /api/rooms/:id`）。
+   - **已无视频库管理**（全局 `GET /api/videos` 已移除）。
 
 ## 当前使用的接口
 
@@ -81,15 +82,21 @@ WatchTvTogether 的 Vue 3 前端项目，用于实现「一起看电视/电影�
 - `GET /api/rooms/{roomId}/chat`：聊天历史（`before_id`、`limit`、可选 `password` 查询参数）
 - `POST /api/rooms/{roomId}/chat`：发送聊天（`text`、可选 `password`）
 - `POST /api/ably/token`：签发当前房间的 **Ably JWT**（JSON：`token`、`expires_at`；仅 subscribe / presence / history）
-- `POST /api/rooms/{roomId}/control`：房主/管理员提交播放控制，服务端发布 `room.sync`
+- `POST /api/rooms/{roomId}/control`：房主/管理员提交播放控制（`video_id` / `queue[]` 为外链 URL；可选 `video_duration` 供进度投影）；服务端发布 `room.sync`
 - `POST /api/rooms/{roomId}/kick/{userId}`：踢出成员
+- `DELETE /api/rooms/{roomId}`：关闭并删除房间（房主或管理员）
 
-### 视频
+### 管理员
 
-- `GET /api/videos?limit=50&status=...&q=...`：查询视频列表（条目的可播放地址优先取 `file_url` / `source_url` 等，与无本机存储的后端一致）
-- `DELETE /api/admin/videos/{id}`：删除视频
+- `GET /api/admin/rooms`：房间列表（嵌套 `room` + `online_count` + `playback_action` + `current_video_id`）
 
-**已移除**（Vercel 后端不再提供）：`GET/POST/DELETE /api/admin/downloads*`，以及依赖 `GET /api/capabilities` 中下载相关能力标志的前端逻辑。
+### 播放队列（URL-only）
+
+- 队列条目必须是 `http://`、`https://` 或 `//` 开头的绝对 URL（见 `src/utils/queueUrl.ts`）。
+- 房主在 metadata 加载后上报 `video_duration`，后端用于 `GET /state` / `snapshot` 的进度投影（见 `src/utils/roomStateProjection.ts`）。
+- 后端契约详见 WatchTvTogether 仓库 [docs/room_queue_url_only_zh.md](https://github.com/LKL1235/WatchTvTogether/blob/main/docs/room_queue_url_only_zh.md)。
+
+**已移除**（Vercel 后端不再提供）：`GET /api/videos*`、Admin 视频库 CRUD、`GET/POST/DELETE /api/admin/downloads*`，以及依赖 `GET /api/capabilities` 中下载相关能力标志的前端逻辑（capabilities 现为 `{ "features": {} }`）。
 
 ### 关于 CORS 与 cookie
 
