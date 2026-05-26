@@ -96,8 +96,6 @@ WatchTvTogether 的 Vue 3 前端项目，用于实现「一起看电视/电影�
 - 房主在 metadata 加载后上报 `video_duration`，后端用于 `GET /state` / `snapshot` 的进度投影（见 `src/utils/roomStateProjection.ts`）。
 - 后端契约详见 WatchTvTogether 仓库 [docs/room_queue_url_only_zh.md](https://github.com/LKL1235/WatchTvTogether/blob/main/docs/room_queue_url_only_zh.md)。
 
-**已移除**（Vercel 后端不再提供）：`GET /api/videos*`、Admin 视频库 CRUD、`GET/POST/DELETE /api/admin/downloads*`，以及依赖 `GET /api/capabilities` 中下载相关能力标志的前端逻辑（capabilities 现为 `{ "features": {} }`）。
-
 ### 关于 CORS 与 cookie
 
 - 若前后端分属不同源，需由后端 `Access-Control-Allow-Origin` 等配置与前端 `VITE_API_BASE` 一致；本应用以 **Bearer token** 为主，一般无需跨站 cookie。
