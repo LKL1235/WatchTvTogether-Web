@@ -94,7 +94,10 @@ WatchTvTogether 的 Vue 3 前端项目，用于实现「一起看电视/电影�
 
 - 队列条目必须是 `http://`、`https://` 或 `//` 开头的绝对 URL（见 `src/utils/queueUrl.ts`）。
 - 房主在 metadata 加载后上报 `video_duration`，后端用于 `GET /state` / `snapshot` 的进度投影（见 `src/utils/roomStateProjection.ts`）。
-- 后端契约详见 WatchTvTogether 仓库 [docs/room_queue_url_only_zh.md](https://github.com/LKL1235/WatchTvTogether/blob/main/docs/room_queue_url_only_zh.md)。
+- 后端契约详见 WatchTvTogether 仓库：
+  - [docs/room_queue_url_only_zh.md](https://github.com/LKL1235/WatchTvTogether/blob/main/docs/room_queue_url_only_zh.md)（URL 校验、`video_duration`、进度投影）
+  - [docs/room_chat_realtime_design_zh.md](https://github.com/LKL1235/WatchTvTogether/blob/main/docs/room_chat_realtime_design_zh.md)（聊天 HTTP + Ably `room.chat`）
+  - [docs/room_empty_cleanup_ops_zh.md](https://github.com/LKL1235/WatchTvTogether/blob/main/docs/room_empty_cleanup_ops_zh.md)（空房清理与 `room cleanup:` 日志排障）
 
 ### 关于 CORS 与 cookie
 
@@ -103,6 +106,14 @@ WatchTvTogether 的 Vue 3 前端项目，用于实现「一起看电视/电影�
 ### 实时通道
 
 - **房间**：浏览器连接 **Ably**（见上文），不再使用 `GET /ws/room/:roomId`。
+
+## 后端设计文档（排障）
+
+与 Go API 行为不一致时，以 **WatchTvTogether** 仓库 `docs/` 为准（上节链接）。常见场景：
+
+- 队列 URL 被拒：对照 `room_queue_url_only_zh.md` 与 `src/utils/queueUrl.ts`
+- 进度不同步：确认房主是否上报 `video_duration`；客户端投影见 `src/utils/roomStateProjection.ts`
+- 房间删不掉 / 幽灵房：查后端 stdout 中 `room cleanup:` 日志（`room_empty_cleanup_ops_zh.md`）
 
 ## TodoList（待优化项）
 
