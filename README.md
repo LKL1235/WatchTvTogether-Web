@@ -14,6 +14,16 @@
 
 WatchTvTogether 的 Vue 3 前端项目，用于实现「一起看电视/电影」的房间管理、同步播放和管理员后台。**后端（Go API）部署在 Vercel**：无持久磁盘、不提供服务端视频下载与本地入库（无 ffmpeg / yt-dlp 流水线）。**无全局影片库**——房主在房间内手动添加 **http(s) 或协议相对（`//`）播放 URL** 组成队列；同步状态与队列存于 Redis，由 Ably 推送。
 
+## 本地开发
+
+```bash
+npm install
+VITE_API_BASE="" npm run dev   # :5173，/api 代理到 localhost:8080（见 vite.config.ts）
+```
+
+- **`VITE_API_BASE=""` 必填**，否则默认请求生产 API。
+- 质量检查：`npx vue-tsc --noEmit`、`npm run test`、`npm run build`（与 `AGENTS.md` 一致）。
+
 ## 环境变量
 
 - `VITE_API_BASE`：后端 HTTP API 根地址。生产/预览部署时请设为 Vercel 上的 Go API 域名（例如 `https://your-api.vercel.app`）；本地开发可省略（默认 `https://watchtvtogether.bestlkl.top`），或由 `vite` 代理到本机后端。**前端仅通过该变量拼接请求与播放 URL，不涉及服务端密钥。**
@@ -47,13 +57,18 @@ WatchTvTogether 的 Vue 3 前端项目，用于实现「一起看电视/电影�
    - 同步控制：房主通过 `POST /api/rooms/:roomId/control` 提交全局播放、暂停、进度与切视频；普通成员不提交全局控制。
    - 队列管理：手动输入播放 URL（可选本机展示名）、上移下移、删除、切换；展示名仅存浏览器内存，跨成员同步的仍是 URL 列表。
    - 分享：`/room/:roomId` 深链，私有房可在查询参数中带 `password`（登录后加入）；分享弹窗可复制链接。
-   - **聊天**（桌面右侧可折叠列 / 移动底部 Sheet）：加载 `GET /api/rooms/:roomId/chat` 历史；发送 `POST /api/rooms/:roomId/chat`；实时增量由 Ably `room.chat` 推送。聊天区顶部为**在线成员**（Ably Presence，可折叠；列表固定高度滚动），房主/管理员可踢人。
-   - **视频队列**：独立工具抽屉（舞台区「队列」按钮）；不含聊天。
+   - **聊天**（`src/components/room/RoomChatPanel.vue` 等）：
+     - **桌面（≥961px）**：右侧可拖拽调宽（`RoomChatResizer` + `useRoomChatPanelLayout`，默认 340px，范围 280–480px 或 38vw）；宽度与折叠态持久化在 `localStorage`（`wtt.roomChatPanel.v1`）；折叠为 40px 竖条 + 展开按钮；全屏时隐藏侧栏（移动 Sheet 仍可用）。
+     - **移动**：舞台「聊天」打开底部 Sheet（`RoomChatSheet`，默认 65vh，可拖到 92vh）；Esc / 遮罩关闭。
+     - 历史 `GET .../chat`，发送 `POST .../chat`（正文上限 2000 字符，见 `ROOM_CHAT_MAX_TEXT_RUNES`）；实时由 Ably `room.chat`（`useRoomRealtime`，缓冲约 200 条、按 `seq` 去重）。未到底部时显示「↓ 新消息」；503 时禁用发送并展示横幅。
+     - 顶部**在线成员**（Presence，`RoomChatMembersBlock`）；房主/管理员可踢人。
+   - **视频队列**：独立工具抽屉 `RoomToolsDrawer`（舞台「队列」）；支持顺序/循环播放模式与「下一首」；不含聊天。
    - 开发模式下展示最近实时消息与连接状态。
 
 4. **管理员后台页（AdminView）**
-   - 房间监控：当前房间数、在线人数、播放状态、当前 URL。
-   - 管理员可关闭并删除房间（`DELETE /api/rooms/:id`）。
+   - 通过顶栏切换进入（无独立 `/admin` 路由）；统计卡片为**房间数量**。
+   - 列表来自 `GET /api/admin/rooms`，客户端用 `src/utils/adminRoom.ts` 展平嵌套 `items[].room`。
+   - 展示在线人数、播放动作、当前 URL；**手动刷新**（无轮询）；可**进入房间**（免输私有房密码）、**关闭并删除**房间。
    - **已无视频库管理**（全局 `GET /api/videos` 已移除）。
 
 ## 当前使用的接口
@@ -75,7 +90,8 @@ WatchTvTogether 的 Vue 3 前端项目，用于实现「一起看电视/电影�
 
 - `GET /api/rooms`：获取房间列表
 - `POST /api/rooms`：创建房间
-- `POST /api/rooms/{roomId}/join`：加入房间
+- `POST /api/rooms/{roomId}/join`：加入房间（可能返回 `left_room_id`）
+- `POST /api/rooms/{roomId}/leave`：离开房间
 - `GET /api/rooms/{roomId}`：获取单个房间详情
 - `GET /api/rooms/{roomId}/state`：轻量读取播放状态
 - `POST /api/rooms/{roomId}/snapshot`：进入房间时完整初始化快照（含 Ably 频道名）
@@ -92,8 +108,10 @@ WatchTvTogether 的 Vue 3 前端项目，用于实现「一起看电视/电影�
 
 ### 播放队列（URL-only）
 
-- 队列条目必须是 `http://`、`https://` 或 `//` 开头的绝对 URL（见 `src/utils/queueUrl.ts`）。
-- 房主在 metadata 加载后上报 `video_duration`，后端用于 `GET /state` / `snapshot` 的进度投影（见 `src/utils/roomStateProjection.ts`）。
+- 队列条目必须是 `http://`、`https://` 或 `//` 开头的绝对 URL；提交前由 `src/utils/queueUrl.ts` 的 `isPlaybackUrl()` 校验。
+- 房主在 `loadedmetadata` 后通过 `POST .../control` 上报 **`video_duration`**（秒）；**服务端**在 `snapshot` / `GET /state` 中做进度投影。
+- **客户端**在 `src/utils/roomStateProjection.ts` 中根据 `video_duration` 与经过时间**外推**当前进度：`advancePlayPositionSinceServerUpdatedAt`（对齐 `updated_at`，用于 snapshot/state）、`refineRoomStateWithProjection`（对齐 `base_updated_at`，用于 Ably `room.sync`）；循环模式下可在片尾回绕位置。
+- 顺序/切歌逻辑见 `src/utils/roomPlayback.ts`；展示名仅本地（`queueDisplay.ts`，可重命名，最长 80 字）。
 - 后端契约详见 WatchTvTogether 仓库：
   - [docs/room_queue_url_only_zh.md](https://github.com/LKL1235/WatchTvTogether/blob/main/docs/room_queue_url_only_zh.md)（URL 校验、`video_duration`、进度投影）
   - [docs/room_chat_realtime_design_zh.md](https://github.com/LKL1235/WatchTvTogether/blob/main/docs/room_chat_realtime_design_zh.md)（聊天 HTTP + Ably `room.chat`）
@@ -130,8 +148,7 @@ WatchTvTogether 的 Vue 3 前端项目，用于实现「一起看电视/电影�
    - 优化表单布局与可读性（标签、占位符、分组）。
 
 4. **响应式适配加强**
-   - 提升移动端与平板体验。
-   - 房间页侧边栏在小屏下改为抽屉或分段布局。
+   - 提升移动端与平板体验（房间聊天/队列抽屉已落地，可继续打磨动效与触控）。
 
 5. **状态与错误处理完善**
    - 统一空态、加载态、失败态组件。
